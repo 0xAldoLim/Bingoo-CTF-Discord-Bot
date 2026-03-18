@@ -26,7 +26,6 @@
 ## 📦 Installation
 
 1. Clone the repository
-```bash
 git clone https://github.com/0xAldoLim/Bingoo-CTF-Discord-Bot.git
 cd Bingoo-CTF-Discord-Bot
 

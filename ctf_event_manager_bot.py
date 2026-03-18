@@ -54,6 +54,25 @@ def calc_duration(start: datetime, end: datetime) -> str:
         return f"{days}d {hours}h" if hours else f"{days}d"
     return f"{total_hours:.0f}h"
 
+async def auto_complete_past_events():
+    """Mark any active events whose end_date has passed as 'completed'."""
+    now = datetime.now(MYT)
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute(
+            "SELECT id, end_date FROM events WHERE status = 'active'"
+        )
+        rows = await cursor.fetchall()
+        for event_id, end_str in rows:
+            end_dt = datetime.fromisoformat(end_str)
+            if end_dt.tzinfo is None:
+                end_dt = end_dt.replace(tzinfo=MYT)
+            if end_dt < now:
+                await db.execute(
+                    "UPDATE events SET status = 'completed' WHERE id = ?",
+                    (event_id,)
+                )
+        await db.commit()
+
 def to_discord_timestamp(dt: datetime, style: str = "F") -> str:
     """Convert a datetime to a Discord timestamp string.
     Styles: F = full date+time, D = date only, R = relative (e.g. 'in 3 days')
@@ -71,9 +90,15 @@ async def init_db():
                 end_date TEXT NOT NULL,
                 mode TEXT NOT NULL,
                 prizes TEXT,
-                created_by TEXT NOT NULL
+                created_by TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'active'
             )
         """)
+        # Migration: add status column if upgrading from older schema
+        cursor = await db.execute("PRAGMA table_info(events)")
+        columns = [row[1] for row in await cursor.fetchall()]
+        if "status" not in columns:
+            await db.execute("ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'active'")
         await db.commit()
 
 # ========= MODE CHOICES =========
@@ -104,8 +129,10 @@ async def help_cmd(interaction: discord.Interaction):
 
     commands_info = [
         ("📅 /add_event", "Add a new CTF event with name, start/end date, mode, and optional prizes"),
-        ("📋 /list_events", "List all CTF events sorted by nearest date, with MYT timestamps and duration"),
-        ("🗑️ /delete_event", "Delete an event by its ID (shown in `/list_events`)"),
+        ("📋 /list_events", "List all active/upcoming CTF events sorted by nearest date"),
+        ("✅ /complete_event", "Manually mark an event as completed by its ID"),
+        ("🏆 /completed", "View all completed events"),
+        ("🗑️ /delete_event", "Delete a single event by ID, or clear all past/completed events"),
         ("🏓 /ping", "Check if the bot is online and see latency"),
         ("👤 /whoami", "Show your user info, roles, and server join date"),
         ("📅 /date", "Show the current date and time"),
@@ -254,37 +281,42 @@ async def add_event(
 
 # ------------------------
 
-@bot.tree.command(name="list_events", description="List all CTF events", guild=MY_GUILD)
+@bot.tree.command(name="list_events", description="List all active/upcoming CTF events", guild=MY_GUILD)
 async def list_events(interaction: discord.Interaction):
+    # Auto-complete any events whose end date has passed
+    await auto_complete_past_events()
+
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute("""
             SELECT id, name, start_date, end_date, mode, prizes
-            FROM events ORDER BY start_date ASC
+            FROM events WHERE status = 'active' ORDER BY start_date ASC
         """)
         rows = await cursor.fetchall()
 
     if not rows:
-        await interaction.response.send_message("No events found.")
+        await interaction.response.send_message("No active events found. Check `/completed` for past events.")
         return
 
-    # Sort: upcoming events first (nearest start), then past events
     now = datetime.now(MYT)
     upcoming = []
-    past = []
+    ongoing = []
 
     for row in rows:
         start_dt = datetime.fromisoformat(row[2])
+        end_dt = datetime.fromisoformat(row[3])
         if start_dt.tzinfo is None:
             start_dt = start_dt.replace(tzinfo=MYT)
-        if start_dt >= now:
-            upcoming.append(row)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=MYT)
+        if start_dt <= now <= end_dt:
+            ongoing.append(row)
         else:
-            past.append(row)
+            upcoming.append(row)
 
-    # Upcoming sorted nearest first, past sorted most recent first
-    sorted_rows = upcoming + list(reversed(past))
+    # Ongoing first, then upcoming (nearest first)
+    sorted_rows = ongoing + upcoming
 
-    embed = discord.Embed(title="📅 CTF Events", color=0x00ff88)
+    embed = discord.Embed(title="📅 Active CTF Events", color=0x00ff88)
 
     for idx, row in enumerate(sorted_rows, start=1):
         event_id, name, start_str, end_str, mode, prizes = row
@@ -300,8 +332,13 @@ async def list_events(interaction: discord.Interaction):
         duration = calc_duration(start_dt, end_dt)
         mode_display = "Jeopardy" if mode == "jeopardy" else "Attack & Defend"
 
+        if start_dt <= now <= end_dt:
+            status_tag = "🔴 LIVE NOW"
+        else:
+            status_tag = "🟢 Upcoming"
+
         desc = (
-            f"**ID:** `{event_id}` (use with `/delete_event`)\n"
+            f"**ID:** `{event_id}` | **Status:** {status_tag}\n"
             f"**Start:** {format_myt(start_dt)} ({start_rel})\n"
             f"**End:** {format_myt(end_dt)}\n"
             f"**Duration:** {duration}\n"
@@ -312,33 +349,157 @@ async def list_events(interaction: discord.Interaction):
 
         embed.add_field(name=f"{idx}. {name}", value=desc, inline=False)
 
-    embed.set_footer(text="All times shown in MYT (UTC+8)")
+    embed.set_footer(text="All times shown in MYT (UTC+8) • Past events auto-move to /completed")
     await interaction.response.send_message(embed=embed)
 
 # ------------------------
 
-@bot.tree.command(name="delete_event", description="Delete event by ID", guild=MY_GUILD)
-@app_commands.describe(event_id="The ID of the event to delete (shown in /list_events)")
-async def delete_event(interaction: discord.Interaction, event_id: int):
+DELETE_CHOICES = [
+    app_commands.Choice(name="Single event (by ID)", value="single"),
+    app_commands.Choice(name="All completed events", value="all_completed"),
+]
+
+@bot.tree.command(name="delete_event", description="Delete events", guild=MY_GUILD)
+@app_commands.describe(
+    action="What to delete",
+    event_id="Event ID to delete (only needed for 'Single event')",
+)
+@app_commands.choices(action=DELETE_CHOICES)
+async def delete_event(
+    interaction: discord.Interaction,
+    action: app_commands.Choice[str],
+    event_id: int = None,
+):
+    if action.value == "single":
+        if event_id is None:
+            await interaction.response.send_message(
+                "❌ Please provide an `event_id` when deleting a single event.",
+                ephemeral=True
+            )
+            return
+
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute(
+                "SELECT name FROM events WHERE id = ?", (event_id,)
+            )
+            row = await cursor.fetchone()
+
+            if not row:
+                await interaction.response.send_message(
+                    f"❌ No event with ID `{event_id}`",
+                    ephemeral=True
+                )
+                return
+
+            await db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+            await db.commit()
+
+        await interaction.response.send_message(f"🗑️ Deleted event **{row[0]}** (ID: `{event_id}`)")
+
+    elif action.value == "all_completed":
+        await auto_complete_past_events()
+
+        async with aiosqlite.connect(DATABASE_PATH) as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM events WHERE status = 'completed'"
+            )
+            count = (await cursor.fetchone())[0]
+
+            if count == 0:
+                await interaction.response.send_message(
+                    "No completed events to clear.",
+                    ephemeral=True
+                )
+                return
+
+            await db.execute("DELETE FROM events WHERE status = 'completed'")
+            await db.commit()
+
+        await interaction.response.send_message(
+            f"🧹 Cleared **{count}** completed event{'s' if count != 1 else ''}!"
+        )
+
+# ------------------------
+
+@bot.tree.command(name="complete_event", description="Manually mark an event as completed", guild=MY_GUILD)
+@app_commands.describe(event_id="The ID of the event to mark as completed")
+async def complete_event(interaction: discord.Interaction, event_id: int):
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
-            "SELECT name FROM events WHERE id = ?", (event_id,)
+            "SELECT name, status FROM events WHERE id = ?", (event_id,)
         )
         row = await cursor.fetchone()
 
         if not row:
             await interaction.response.send_message(
-                f"❌ No event with ID {event_id}",
+                f"❌ No event with ID `{event_id}`",
                 ephemeral=True
             )
             return
 
-        await db.execute("DELETE FROM events WHERE id = ?", (event_id,))
+        if row[1] == "completed":
+            await interaction.response.send_message(
+                f"ℹ️ Event **{row[0]}** is already marked as completed.",
+                ephemeral=True
+            )
+            return
+
+        await db.execute(
+            "UPDATE events SET status = 'completed' WHERE id = ?", (event_id,)
+        )
         await db.commit()
 
     await interaction.response.send_message(
-        f"🗑️ Deleted event '{row[0]}'"
+        f"✅ Event **{row[0]}** (ID: `{event_id}`) marked as completed!"
     )
+
+# ------------------------
+
+@bot.tree.command(name="completed", description="View all completed CTF events", guild=MY_GUILD)
+async def completed_events(interaction: discord.Interaction):
+    await auto_complete_past_events()
+
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("""
+            SELECT id, name, start_date, end_date, mode, prizes
+            FROM events WHERE status = 'completed' ORDER BY end_date DESC
+        """)
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("No completed events yet.")
+        return
+
+    embed = discord.Embed(title="🏆 Completed CTF Events", color=0xFFD700)
+
+    for idx, row in enumerate(rows, start=1):
+        event_id, name, start_str, end_str, mode, prizes = row
+
+        start_dt = datetime.fromisoformat(start_str)
+        end_dt = datetime.fromisoformat(end_str)
+        if start_dt.tzinfo is None:
+            start_dt = start_dt.replace(tzinfo=MYT)
+        if end_dt.tzinfo is None:
+            end_dt = end_dt.replace(tzinfo=MYT)
+
+        duration = calc_duration(start_dt, end_dt)
+        mode_display = "Jeopardy" if mode == "jeopardy" else "Attack & Defend"
+        end_rel = to_discord_timestamp(end_dt, "R")
+
+        desc = (
+            f"**ID:** `{event_id}`\n"
+            f"**Ran:** {format_myt(start_dt)} → {format_myt(end_dt)}\n"
+            f"**Ended:** {end_rel}\n"
+            f"**Duration:** {duration}\n"
+            f"**Mode:** {mode_display}"
+        )
+        if prizes:
+            desc += f"\n**Prizes:** {prizes}"
+
+        embed.add_field(name=f"{idx}. {name}", value=desc, inline=False)
+
+    embed.set_footer(text="Use /delete_event → 'All completed events' to clear this list")
+    await interaction.response.send_message(embed=embed)
 
 # ========= EVENTS =========
 

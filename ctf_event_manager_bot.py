@@ -120,6 +120,8 @@ async def date_cmd(interaction: discord.Interaction):
 @app_commands.describe(choice="Pick your weapon!")
 @app_commands.choices(choice=RPS_CHOICES)
 async def rps(interaction: discord.Interaction, choice: app_commands.Choice[str]):
+    await interaction.response.defer()
+
     player_pick = choice.value
     bot_pick = random.choice(["rock", "paper", "scissors"])
 
@@ -143,7 +145,7 @@ async def rps(interaction: discord.Interaction, choice: app_commands.Choice[str]
     embed.add_field(name="Bot", value=f"{bot_emoji} {bot_pick.capitalize()}", inline=True)
     embed.add_field(name="Result", value=result_text, inline=False)
 
-    await interaction.response.send_message(embed=embed)
+    await interaction.followup.send(embed=embed)
 
 # ------------------------
 

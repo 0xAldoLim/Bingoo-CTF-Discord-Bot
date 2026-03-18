@@ -1,47 +1,86 @@
 # 🎯 Bingoo — CTF Event Manager Discord Bot
 
-A Discord bot to manage and track upcoming CTF events.
+> A Discord bot designed to manage and track upcoming Capture The Flag (CTF) events efficiently within your server.
 
-## Features
-- Add CTF events
-- List events
-- Delete events
-- Slash command support
-- SQLite database
+---
 
-## Installation
+## 🚀 Features
 
+- ➕ Add new CTF events via slash commands  
+- 📅 List all upcoming events  
+- ❌ Delete events by ID  
+- ⚡ Instant slash command support (guild-based sync)  
+- 🗄️ Lightweight SQLite database  
+
+---
+
+## 🛠️ Tech Stack
+
+- Python 3.10+
+- discord.py
+- aiosqlite
+- python-dotenv
+
+---
+
+## 📦 Installation
+
+### 1. Clone the repository
 ```bash
 git clone https://github.com/0xAldoLim/Bingoo-CTF-Discord-Bot.git
 cd Bingoo-CTF-Discord-Bot
+2. Create and activate virtual environment
 python -m venv .venv
 .venv\Scripts\activate
+3. Install dependencies
 pip install discord.py aiosqlite python-dotenv
-Setup
+⚙️ Configuration
 
-Create .env file:
+Create a .env file in the root directory:
 
 TOKEN=your_discord_bot_token_here
-Run
+
+⚠️ Never expose your token publicly.
+
+▶️ Running the Bot
 python ctf_event_manager_bot.py
-Commands
+🤖 Commands
+Command	Description
+/ping	Check if bot is online
+/add_event	Add a new CTF event
+/list_events	List all stored events
+/delete_event	Delete event by ID
+📁 Project Structure
+.
+├── ctf_event_manager_bot.py
+├── events.db
+├── .env
+├── .gitignore
+├── README.md
+🔐 Security
 
-/ping
+Tokens are stored in .env
 
-/add_event
+.env is excluded via .gitignore
 
-/list_events
+Do not commit secrets to GitHub
 
-/delete_event
+📌 Future Improvements
 
-Notes
+Event reminders & notifications
 
-Make sure bot is invited with applications.commands
+Multi-server support
 
-Ensure correct GUILD_ID in code
+Role-based permissions
 
-Never commit .env
+Web dashboard interface
 
-Author
+👤 Author
 
 Aldo Lim Saputra
+Cybersecurity Student @ APU
+CTF Player & Developer
+
+⭐ Support
+
+If you find this useful, consider giving the repository a star.

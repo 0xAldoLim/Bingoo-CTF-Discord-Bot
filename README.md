@@ -29,10 +29,10 @@
 ```bash
 git clone https://github.com/0xAldoLim/Bingoo-CTF-Discord-Bot.git
 cd Bingoo-CTF-Discord-Bot
-2. Create and activate virtual environment
+### 2. Create and activate virtual environment
 python -m venv .venv
 .venv\Scripts\activate
-3. Install dependencies
+### 3. Install dependencies
 pip install discord.py aiosqlite python-dotenv
 ⚙️ Configuration
 
@@ -42,7 +42,7 @@ TOKEN=your_discord_bot_token_here
 
 ⚠️ Never expose your token publicly.
 
-▶️ Running the Bot
+## ▶️ Running the Bot
 python ctf_event_manager_bot.py
 🤖 Commands
 Command	Description
@@ -57,7 +57,8 @@ Command	Description
 ├── .env
 ├── .gitignore
 ├── README.md
-🔐 Security
+
+## 🔐 Security
 
 Tokens are stored in .env
 
@@ -65,7 +66,7 @@ Tokens are stored in .env
 
 Do not commit secrets to GitHub
 
-📌 Future Improvements
+## 📌 Future Improvements
 
 Event reminders & notifications
 
@@ -75,7 +76,7 @@ Role-based permissions
 
 Web dashboard interface
 
-👤 Author
+## 👤 Author
 
 Aldo Lim Saputra
 Cybersecurity Student @ APU

@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1477990463289167912           # your server ID
-REMINDER_CHANNEL_ID = 1478229698659090615              # set to a channel ID to enable reminders, e.g. 1234567890
+REMINDER_CHANNEL_ID = None               # set to a channel ID to enable reminders, e.g. 1234567890
 DATABASE_PATH = "events.db"
 
 # Malaysia Time (UTC+8)
@@ -86,7 +86,8 @@ async def init_db():
                 created_by TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'active',
                 reminded_24h INTEGER NOT NULL DEFAULT 0,
-                reminded_1h INTEGER NOT NULL DEFAULT 0
+                reminded_1h INTEGER NOT NULL DEFAULT 0,
+                placement TEXT
             )
         """)
         # Migration for older databases
@@ -97,6 +98,7 @@ async def init_db():
             "url": "ALTER TABLE events ADD COLUMN url TEXT",
             "reminded_24h": "ALTER TABLE events ADD COLUMN reminded_24h INTEGER NOT NULL DEFAULT 0",
             "reminded_1h": "ALTER TABLE events ADD COLUMN reminded_1h INTEGER NOT NULL DEFAULT 0",
+            "placement": "ALTER TABLE events ADD COLUMN placement TEXT",
         }
         for col, sql in migrations.items():
             if col not in columns:
@@ -230,20 +232,22 @@ async def help_cmd(interaction: discord.Interaction):
         color=0x5865F2
     )
     cmds = [
-        ("📅 /add_event",      "Add a new CTF event (name, dates, mode, prizes, URL)"),
-        ("✏️ /edit_event",      "Edit an existing event's details"),
-        ("📋 /list_events",     "List active/upcoming events with pagination"),
-        ("✅ /complete_event",  "Manually mark an event as completed"),
-        ("🏆 /completed",       "View all completed events"),
-        ("🗑️ /delete_event",   "Delete a single event or clear all completed"),
-        ("📤 /export",          "Export events to a CSV file"),
-        ("🌐 /ctftime",         "Pull upcoming CTFs from CTFtime"),
-        ("📊 /stats",           "View team CTF statistics"),
-        ("🏓 /ping",            "Check bot latency"),
-        ("👤 /whoami",          "Show your user info and roles"),
-        ("📅 /date",            "Show current date and time"),
-        ("🪨 /rps",             "Play Rock Paper Scissors"),
-        ("❓ /help",            "Show this message"),
+        ("📅 /add_event",        "Add a new CTF event (name, dates, mode, prizes, URL)"),
+        ("✏️ /edit_event",        "Edit an existing event's details"),
+        ("📋 /list_events",       "List active/upcoming events with pagination"),
+        ("⏭️ /upcoming",          "Show the nearest upcoming event"),
+        ("✅ /complete_event",    "Manually mark an event as completed"),
+        ("🏆 /completed",         "View all completed events with placements"),
+        ("🏅 /edit_completed",    "Add or update placement rank on a completed event"),
+        ("🗑️ /delete_event",     "Delete a single event or clear all completed"),
+        ("📤 /export",            "Export events to a CSV file"),
+        ("🌐 /ctftime",           "Pull upcoming CTFs from CTFtime"),
+        ("📊 /stats",             "View team CTF statistics"),
+        ("🏓 /ping",              "Check bot latency"),
+        ("👤 /whoami",            "Show your user info and roles"),
+        ("📅 /date",              "Show current date and time"),
+        ("🪨 /rps",               "Play Rock Paper Scissors"),
+        ("❓ /help",              "Show this message"),
     ]
     for name, desc in cmds:
         embed.add_field(name=name, value=desc, inline=False)
@@ -487,6 +491,67 @@ async def list_events(interaction: discord.Interaction):
     view = PaginatedEmbed(pages, interaction.user.id) if len(pages) > 1 else None
     await interaction.response.send_message(embed=pages[0], view=view)
 
+# ---- /upcoming ----
+
+@bot.tree.command(name="upcoming", description="Show the nearest upcoming event", guild=MY_GUILD)
+async def upcoming_event(interaction: discord.Interaction):
+    await auto_complete_past_events()
+    now = datetime.now(MYT)
+
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("""
+            SELECT id, name, start_date, end_date, mode, prizes, url
+            FROM events WHERE status = 'active' ORDER BY start_date ASC
+        """)
+        rows = await cursor.fetchall()
+
+    if not rows:
+        await interaction.response.send_message("No upcoming events. Time to find a CTF!")
+        return
+
+    # Find first upcoming or ongoing event
+    picked = None
+    for row in rows:
+        start_dt = ensure_tz(datetime.fromisoformat(row[2]))
+        end_dt = ensure_tz(datetime.fromisoformat(row[3]))
+        if end_dt >= now:
+            picked = row
+            break
+
+    if not picked:
+        await interaction.response.send_message("No upcoming events. Time to find a CTF!")
+        return
+
+    event_id, name, start_str, end_str, mode, prizes, url = picked
+    start_dt = ensure_tz(datetime.fromisoformat(start_str))
+    end_dt = ensure_tz(datetime.fromisoformat(end_str))
+    duration = calc_duration(start_dt, end_dt)
+    mode_display = "Jeopardy" if mode == "jeopardy" else "Attack & Defend"
+
+    if start_dt <= now <= end_dt:
+        status = "🔴 LIVE NOW"
+        color = 0xFF4444
+    elif (start_dt - now).total_seconds() / 3600 <= 24:
+        status = "⚠️ Starting soon!"
+        color = 0xFFD700
+    else:
+        status = "🟢 Upcoming"
+        color = 0x00FF88
+
+    embed = discord.Embed(title=f"⏭️ Next Up: {name}", color=color)
+    embed.add_field(name="Status", value=status, inline=True)
+    embed.add_field(name="ID", value=f"`{event_id}`", inline=True)
+    embed.add_field(name="Mode", value=mode_display, inline=True)
+    embed.add_field(name="Start", value=f"{format_myt(start_dt)}\n{to_discord_timestamp(start_dt, 'R')}", inline=True)
+    embed.add_field(name="End", value=format_myt(end_dt), inline=True)
+    embed.add_field(name="Duration", value=f"**{duration}**", inline=True)
+    if url:
+        embed.add_field(name="Link", value=f"[CTF Page]({url})", inline=False)
+    if prizes:
+        embed.add_field(name="Prizes", value=prizes, inline=False)
+    embed.set_footer(text="All times in MYT (UTC+8)")
+    await interaction.response.send_message(embed=embed)
+
 # ---- /completed ----
 
 @bot.tree.command(name="completed", description="View all completed CTF events", guild=MY_GUILD)
@@ -495,7 +560,7 @@ async def completed_events(interaction: discord.Interaction):
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute("""
-            SELECT id, name, start_date, end_date, mode, prizes, url
+            SELECT id, name, start_date, end_date, placement
             FROM events WHERE status = 'completed' ORDER BY end_date DESC
         """)
         rows = await cursor.fetchall()
@@ -504,12 +569,67 @@ async def completed_events(interaction: discord.Interaction):
         await interaction.response.send_message("No completed events yet.")
         return
 
-    pages = build_event_pages(
-        "🏆 Completed CTF Events", 0xFFD700, rows,
-        "Use /delete_event → 'All completed events' to clear this list"
-    )
+    EVENTS_PER_PAGE = 5
+    pages = []
+
+    for page_start in range(0, len(rows), EVENTS_PER_PAGE):
+        page_rows = rows[page_start:page_start + EVENTS_PER_PAGE]
+        embed = discord.Embed(title="🏆 Completed CTF Events", color=0xFFD700)
+
+        for idx, row in enumerate(page_rows, start=page_start + 1):
+            event_id, name, start_str, end_str, placement = row
+
+            start_dt = ensure_tz(datetime.fromisoformat(start_str))
+            end_dt = ensure_tz(datetime.fromisoformat(end_str))
+            end_rel = to_discord_timestamp(end_dt, "R")
+
+            desc = (
+                f"**ID:** `{event_id}`\n"
+                f"**Ran:** {format_myt(start_dt)} → {format_myt(end_dt)}\n"
+                f"**Ended:** {end_rel}"
+            )
+            if placement:
+                desc += f"\n**Placement:** 🏅 {placement}"
+            else:
+                desc += f"\n**Placement:** _Not set — use `/edit_completed`_"
+
+            embed.add_field(name=f"{idx}. {name}", value=desc, inline=False)
+
+        embed.set_footer(text="Use /edit_completed to add placement • /delete_event to clear")
+        pages.append(embed)
+
     view = PaginatedEmbed(pages, interaction.user.id) if len(pages) > 1 else None
     await interaction.response.send_message(embed=pages[0], view=view)
+
+# ---- /edit_completed ----
+
+@bot.tree.command(name="edit_completed", description="Add or update placement rank on a completed event", guild=MY_GUILD)
+@app_commands.describe(
+    event_id="ID of the completed event",
+    placement="Your team's placement (e.g. '1st', '3rd / 120 teams', 'Top 10')",
+)
+async def edit_completed(interaction: discord.Interaction, event_id: int, placement: str):
+    async with aiosqlite.connect(DATABASE_PATH) as db:
+        cursor = await db.execute("SELECT name, status FROM events WHERE id = ?", (event_id,))
+        row = await cursor.fetchone()
+
+        if not row:
+            await interaction.response.send_message(f"❌ No event with ID `{event_id}`", ephemeral=True)
+            return
+
+        if row[1] != "completed":
+            await interaction.response.send_message(
+                f"❌ Event **{row[0]}** is not completed yet. Use `/complete_event` first.",
+                ephemeral=True
+            )
+            return
+
+        await db.execute("UPDATE events SET placement = ? WHERE id = ?", (placement, event_id))
+        await db.commit()
+
+    await interaction.response.send_message(
+        f"🏅 Updated placement for **{row[0]}** (ID: `{event_id}`) → **{placement}**"
+    )
 
 # ---- /complete_event ----
 
@@ -574,10 +694,10 @@ async def export_events(interaction: discord.Interaction, scope: app_commands.Ch
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         if scope.value == "all":
-            cursor = await db.execute("SELECT id, name, start_date, end_date, mode, prizes, url, status, created_by FROM events ORDER BY start_date")
+            cursor = await db.execute("SELECT id, name, start_date, end_date, mode, prizes, url, status, created_by, placement FROM events ORDER BY start_date")
         else:
             cursor = await db.execute(
-                "SELECT id, name, start_date, end_date, mode, prizes, url, status, created_by FROM events WHERE status = ? ORDER BY start_date",
+                "SELECT id, name, start_date, end_date, mode, prizes, url, status, created_by, placement FROM events WHERE status = ? ORDER BY start_date",
                 (scope.value,)
             )
         rows = await cursor.fetchall()
@@ -588,13 +708,13 @@ async def export_events(interaction: discord.Interaction, scope: app_commands.Ch
 
     buf = io.StringIO()
     writer = csv.writer(buf)
-    writer.writerow(["ID", "Name", "Start (MYT)", "End (MYT)", "Duration", "Mode", "Prizes", "URL", "Status", "Created By"])
+    writer.writerow(["ID", "Name", "Start (MYT)", "End (MYT)", "Duration", "Mode", "Prizes", "URL", "Status", "Created By", "Placement"])
     for row in rows:
-        eid, name, start_str, end_str, mode, prizes, url, status, created = row
+        eid, name, start_str, end_str, mode, prizes, url, status, created, placement = row
         s = ensure_tz(datetime.fromisoformat(start_str))
         e = ensure_tz(datetime.fromisoformat(end_str))
         mode_display = "Jeopardy" if mode == "jeopardy" else "Attack & Defend"
-        writer.writerow([eid, name, format_myt(s), format_myt(e), calc_duration(s, e), mode_display, prizes or "", url or "", status, created])
+        writer.writerow([eid, name, format_myt(s), format_myt(e), calc_duration(s, e), mode_display, prizes or "", url or "", status, created, placement or ""])
 
     buf.seek(0)
     filename = f"ctf_events_{scope.value}_{datetime.now(MYT).strftime('%Y%m%d')}.csv"

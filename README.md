@@ -1,19 +1,25 @@
 # 🎯 Bingoo — CTF Event Manager Discord Bot
 
-> A Discord bot designed to manage and track upcoming Capture The Flag (CTF) events efficiently within your server.
+> A Discord bot built for CTF teams to manage, track, and review Capture The Flag events — all from within your server.
 
 ---
 
 ## 🚀 Features
 
-- ➕ Add new CTF events via slash commands
-- 📅 List all upcoming events with Discord timestamps (auto timezone)
-- ❌ Delete events by ID
-- 🎮 Mode selection dropdown (Jeopardy / Attack & Defend)
+- 📅 Add, edit, and delete CTF events with slash commands
+- ⏭️ Quickly view the nearest upcoming event
+- 🔴 Live status tags (Upcoming / Starting Soon / Live Now)
+- 🏆 Auto-complete past events and track placement rankings
+- 🌐 Pull upcoming CTFs directly from CTFtime
+- 🔔 Automatic reminders at 24h and 1h before events (requires 24/7 hosting)
+- 📤 Export events to CSV for record-keeping
+- 📊 Team statistics dashboard
+- 📄 Paginated embeds for large event lists
+- 🕐 All timestamps displayed in MYT (UTC+8)
+- 🔗 CTF website URL support on all events
 - 🪨 Rock Paper Scissors mini-game
 - 👤 User info lookup
-- ⚡ Instant slash command support (guild-based sync)
-- 🗄️ Lightweight SQLite database
+- 🗄️ Lightweight SQLite database with auto-migration
 
 ---
 
@@ -22,6 +28,7 @@
 - Python 3.10+
 - discord.py
 - aiosqlite
+- aiohttp
 - python-dotenv
 
 ---
@@ -45,7 +52,7 @@ python -m venv .venv
 3. Install dependencies:
 
 ```bash
-pip install discord.py aiosqlite python-dotenv
+pip install discord.py aiosqlite aiohttp python-dotenv
 ```
 
 ---
@@ -60,6 +67,10 @@ TOKEN=your_discord_bot_token_here
 
 > ⚠️ Never expose your token publicly.
 
+**Optional — Event Reminders:**
+
+To enable automatic reminders (24h and 1h before events), set `REMINDER_CHANNEL_ID` in the bot script to the channel ID where you want pings sent. This requires the bot to be running 24/7 (see Hosting below).
+
 ---
 
 ## ▶️ Running the Bot
@@ -72,15 +83,36 @@ python ctf_event_manager_bot.py
 
 ## 🤖 Commands
 
+### Event Management
+
 | Command | Description |
 |---------|-------------|
-| `/ping` | Check if bot is online (shows latency) |
-| `/add_event` | Add a new CTF event with date, mode, and prizes |
-| `/list_events` | List all stored events with timestamps |
-| `/delete_event` | Delete an event by ID |
+| `/add_event` | Add a new CTF event (name, dates, mode, prizes, URL) |
+| `/edit_event` | Edit an existing event's details |
+| `/list_events` | List all active/upcoming events with pagination |
+| `/upcoming` | Show the nearest upcoming event in detail |
+| `/complete_event` | Manually mark an event as completed |
+| `/completed` | View all completed events with placements |
+| `/edit_completed` | Add or update placement rank on a completed event |
+| `/delete_event` | Delete a single event or clear all completed events |
+
+### Tools & Integrations
+
+| Command | Description |
+|---------|-------------|
+| `/ctftime` | Pull upcoming CTFs from CTFtime (next 30 days) |
+| `/export` | Export active, completed, or all events to CSV |
+| `/stats` | View team CTF statistics and leaderboard |
+
+### Utility
+
+| Command | Description |
+|---------|-------------|
+| `/ping` | Check if bot is online and see latency |
 | `/whoami` | Show your user info, roles, and join date |
-| `/date` | Show the current date and time |
+| `/date` | Show current date and time in MYT |
 | `/rps` | Play Rock Paper Scissors against the bot |
+| `/help` | Show all available commands |
 
 ---
 
@@ -105,11 +137,22 @@ python ctf_event_manager_bot.py
 
 ---
 
+## 🖥️ Hosting (for Reminders)
+
+The event reminder feature requires the bot to run 24/7. Free options include:
+
+- **Oracle Cloud Free Tier** — free forever VM (recommended)
+- **Google Cloud Free Tier** — free e2-micro VM
+- **Railway.app** — free tier with monthly hours
+
+Without 24/7 hosting, all features work normally except automatic reminder pings. The `/list_events` command still shows ⚠️ warnings for events starting within 24h.
+
+---
+
 ## 📌 Future Improvements
 
-- Event reminders & notifications
 - Multi-server support
-- Role-based permissions
+- Role-based permissions for event management
 - Web dashboard interface
 
 ---

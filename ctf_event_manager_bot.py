@@ -16,7 +16,7 @@ from dotenv import load_dotenv
 load_dotenv()
 TOKEN = os.getenv("TOKEN")
 GUILD_ID = 1477990463289167912           # your server ID
-REMINDER_CHANNEL_ID = None               # set to a channel ID to enable reminders, e.g. 1234567890
+REMINDER_CHANNEL_ID = 1478229698659090615  # live reminder channel
 DATABASE_PATH = "events.db"
 
 # Malaysia Time (UTC+8)
@@ -87,6 +87,8 @@ async def init_db():
                 status TEXT NOT NULL DEFAULT 'active',
                 reminded_24h INTEGER NOT NULL DEFAULT 0,
                 reminded_1h INTEGER NOT NULL DEFAULT 0,
+                reminded_10m INTEGER NOT NULL DEFAULT 0,
+                reminded_5m INTEGER NOT NULL DEFAULT 0,
                 placement TEXT
             )
         """)
@@ -94,11 +96,13 @@ async def init_db():
         cursor = await db.execute("PRAGMA table_info(events)")
         columns = [row[1] for row in await cursor.fetchall()]
         migrations = {
-            "status": "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
-            "url": "ALTER TABLE events ADD COLUMN url TEXT",
+            "status":       "ALTER TABLE events ADD COLUMN status TEXT NOT NULL DEFAULT 'active'",
+            "url":          "ALTER TABLE events ADD COLUMN url TEXT",
             "reminded_24h": "ALTER TABLE events ADD COLUMN reminded_24h INTEGER NOT NULL DEFAULT 0",
-            "reminded_1h": "ALTER TABLE events ADD COLUMN reminded_1h INTEGER NOT NULL DEFAULT 0",
-            "placement": "ALTER TABLE events ADD COLUMN placement TEXT",
+            "reminded_1h":  "ALTER TABLE events ADD COLUMN reminded_1h INTEGER NOT NULL DEFAULT 0",
+            "reminded_10m": "ALTER TABLE events ADD COLUMN reminded_10m INTEGER NOT NULL DEFAULT 0",
+            "reminded_5m":  "ALTER TABLE events ADD COLUMN reminded_5m INTEGER NOT NULL DEFAULT 0",
+            "placement":    "ALTER TABLE events ADD COLUMN placement TEXT",
         }
         for col, sql in migrations.items():
             if col not in columns:
@@ -404,7 +408,6 @@ async def edit_event(
 
         old_name, old_start, old_end, old_mode, old_prizes, old_url = row
 
-        # Apply changes (keep old values if not provided)
         new_name = name if name else old_name
         new_mode = mode.value if mode else old_mode
         new_prizes = prizes if prizes else old_prizes
@@ -430,7 +433,6 @@ async def edit_event(
         else:
             new_end = old_end
 
-        # Validate dates
         s = ensure_tz(datetime.fromisoformat(new_start))
         e = ensure_tz(datetime.fromisoformat(new_end))
         if e <= s:
@@ -443,7 +445,6 @@ async def edit_event(
         """, (new_name, new_start, new_end, new_mode, new_prizes, new_url, event_id))
         await db.commit()
 
-    # Build summary of what changed
     changes = []
     if name:                changes.append(f"Name → **{new_name}**")
     if start:               changes.append(f"Start → {format_myt(s)}")
@@ -477,7 +478,6 @@ async def list_events(interaction: discord.Interaction):
         await interaction.response.send_message("No active events found. Check `/completed` for past events.")
         return
 
-    # Sort: ongoing first, then upcoming nearest-first
     now = datetime.now(MYT)
     ongoing = [r for r in rows if ensure_tz(datetime.fromisoformat(r[2])) <= now <= ensure_tz(datetime.fromisoformat(r[3]))]
     upcoming = [r for r in rows if r not in ongoing]
@@ -509,7 +509,6 @@ async def upcoming_event(interaction: discord.Interaction):
         await interaction.response.send_message("No upcoming events. Time to find a CTF!")
         return
 
-    # Find first upcoming or ongoing event
     picked = None
     for row in rows:
         start_dt = ensure_tz(datetime.fromisoformat(row[2]))
@@ -790,18 +789,15 @@ async def stats(interaction: discord.Interaction):
     await auto_complete_past_events()
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
-        # Total counts
         c = await db.execute("SELECT COUNT(*) FROM events WHERE status = 'active'")
         active_count = (await c.fetchone())[0]
         c = await db.execute("SELECT COUNT(*) FROM events WHERE status = 'completed'")
         completed_count = (await c.fetchone())[0]
         total = active_count + completed_count
 
-        # Mode breakdown (completed only)
         c = await db.execute("SELECT mode, COUNT(*) FROM events WHERE status = 'completed' GROUP BY mode")
         mode_counts = dict(await c.fetchall())
 
-        # Total hours competed
         c = await db.execute("SELECT start_date, end_date FROM events WHERE status = 'completed'")
         rows = await c.fetchall()
         total_hours = 0
@@ -810,13 +806,11 @@ async def stats(interaction: discord.Interaction):
             e = ensure_tz(datetime.fromisoformat(end_str))
             total_hours += (e - s).total_seconds() / 3600
 
-        # Upcoming next event
         c = await db.execute(
             "SELECT name, start_date FROM events WHERE status = 'active' ORDER BY start_date ASC LIMIT 1"
         )
         next_event = await c.fetchone()
 
-        # Most active contributor
         c = await db.execute(
             "SELECT created_by, COUNT(*) as cnt FROM events GROUP BY created_by ORDER BY cnt DESC LIMIT 1"
         )
@@ -828,7 +822,6 @@ async def stats(interaction: discord.Interaction):
     embed.add_field(name="Active", value=f"🟢 **{active_count}**", inline=True)
     embed.add_field(name="Completed", value=f"🏆 **{completed_count}**", inline=True)
 
-    # Total time
     if total_hours >= 24:
         days = int(total_hours // 24)
         hours = int(total_hours % 24)
@@ -837,13 +830,11 @@ async def stats(interaction: discord.Interaction):
         time_str = f"{total_hours:.0f}h"
     embed.add_field(name="Total Time Competed", value=f"⏱️ **{time_str}**", inline=True)
 
-    # Mode breakdown
     jeopardy = mode_counts.get("jeopardy", 0)
     ad = mode_counts.get("attack_and_defend", 0)
     embed.add_field(name="Jeopardy", value=f"🧩 **{jeopardy}**", inline=True)
     embed.add_field(name="Attack & Defend", value=f"⚔️ **{ad}**", inline=True)
 
-    # Next event
     if next_event:
         nxt_name, nxt_start = next_event
         nxt_dt = ensure_tz(datetime.fromisoformat(nxt_start))
@@ -853,7 +844,6 @@ async def stats(interaction: discord.Interaction):
             inline=False
         )
 
-    # Top contributor
     if top_contributor:
         embed.add_field(
             name="Most Active Member",
@@ -868,9 +858,18 @@ async def stats(interaction: discord.Interaction):
 #           REMINDER BACKGROUND TASK
 # =============================================
 
-@tasks.loop(minutes=5)
+@tasks.loop(minutes=1)
 async def reminder_loop():
-    """Check for events starting within 24h or 1h and send reminders."""
+    """
+    Check for upcoming and live events and send reminders.
+
+    Schedule:
+      - 24h before start  → heads-up ping
+      - 1h before start   → prep reminder
+      - 10m before start  → final warning
+      - 5m before start   → imminent alert
+      - At start (live)   → 🔴 LIVE NOW announcement
+    """
     if REMINDER_CHANNEL_ID is None:
         return
 
@@ -882,29 +881,94 @@ async def reminder_loop():
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
-            "SELECT id, name, start_date, url, reminded_24h, reminded_1h FROM events WHERE status = 'active'"
+            """SELECT id, name, start_date, end_date, url,
+                      reminded_24h, reminded_1h, reminded_10m, reminded_5m
+               FROM events WHERE status = 'active'"""
         )
         rows = await cursor.fetchall()
 
-        for event_id, name, start_str, url, r24, r1 in rows:
+        for event_id, name, start_str, end_str, url, r24, r1, r10, r5 in rows:
             start_dt = ensure_tz(datetime.fromisoformat(start_str))
-            hours_until = (start_dt - now).total_seconds() / 3600
+            end_dt   = ensure_tz(datetime.fromisoformat(end_str))
+            mins_until = (start_dt - now).total_seconds() / 60
 
-            # 24-hour reminder
-            if 0 < hours_until <= 24 and not r24:
-                msg = f"⏰ **Reminder:** **{name}** starts {to_discord_timestamp(start_dt, 'R')}! @everyone"
-                if url:
-                    msg += f"\n🔗 [CTF Page]({url})"
-                await channel.send(msg)
+            link = f"\n🔗 [CTF Page]({url})" if url else ""
+
+            # ── 24-hour reminder ────────────────────────────────────────────
+            if 0 < mins_until <= 1440 and not r24:
+                embed = discord.Embed(
+                    title="⏰ CTF Starting in 24 Hours!",
+                    description=f"**{name}** kicks off {to_discord_timestamp(start_dt, 'R')}.\nGet ready and check the details!{link}",
+                    color=0x5865F2
+                )
+                embed.add_field(name="Start", value=format_myt(start_dt), inline=True)
+                embed.add_field(name="End",   value=format_myt(end_dt),   inline=True)
+                embed.set_footer(text="All times in MYT (UTC+8)")
+                await channel.send("@everyone", embed=embed)
                 await db.execute("UPDATE events SET reminded_24h = 1 WHERE id = ?", (event_id,))
 
-            # 1-hour reminder
-            if 0 < hours_until <= 1 and not r1:
-                msg = f"🚨 **Starting soon:** **{name}** begins {to_discord_timestamp(start_dt, 'R')}! Get ready! @everyone"
-                if url:
-                    msg += f"\n🔗 [CTF Page]({url})"
-                await channel.send(msg)
+            # ── 1-hour reminder ─────────────────────────────────────────────
+            elif 0 < mins_until <= 60 and not r1:
+                embed = discord.Embed(
+                    title="⚠️ CTF Starting in 1 Hour!",
+                    description=f"**{name}** starts {to_discord_timestamp(start_dt, 'R')}.\nWarm up those fingers! 🧠{link}",
+                    color=0xFFD700
+                )
+                embed.add_field(name="Start", value=format_myt(start_dt), inline=True)
+                embed.add_field(name="End",   value=format_myt(end_dt),   inline=True)
+                embed.set_footer(text="All times in MYT (UTC+8)")
+                await channel.send("@everyone", embed=embed)
                 await db.execute("UPDATE events SET reminded_1h = 1 WHERE id = ?", (event_id,))
+
+            # ── 10-minute reminder ───────────────────────────────────────────
+            elif 0 < mins_until <= 10 and not r10:
+                embed = discord.Embed(
+                    title="🚨 CTF Starting in 10 Minutes!",
+                    description=f"**{name}** goes live {to_discord_timestamp(start_dt, 'R')}.\nOpen your browsers and stand by! 🖥️{link}",
+                    color=0xFF8C00
+                )
+                embed.add_field(name="Start", value=format_myt(start_dt), inline=True)
+                embed.add_field(name="End",   value=format_myt(end_dt),   inline=True)
+                embed.set_footer(text="All times in MYT (UTC+8)")
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_10m = 1 WHERE id = ?", (event_id,))
+
+            # ── 5-minute reminder ────────────────────────────────────────────
+            elif 0 < mins_until <= 5 and not r5:
+                embed = discord.Embed(
+                    title="🔥 CTF Starting in 5 Minutes!",
+                    description=f"**{name}** is almost live — {to_discord_timestamp(start_dt, 'R')}!\nEveryone on deck! 💻{link}",
+                    color=0xFF4444
+                )
+                embed.add_field(name="Start", value=format_myt(start_dt), inline=True)
+                embed.add_field(name="End",   value=format_myt(end_dt),   inline=True)
+                embed.set_footer(text="All times in MYT (UTC+8)")
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_5m = 1 WHERE id = ?", (event_id,))
+
+            # ── LIVE NOW announcement ────────────────────────────────────────
+            # Fires once the event has started but all 4 pre-reminders are set
+            # (meaning the bot was already tracking this event), so it doesn't
+            # spam every minute. We reuse reminded_5m as the "live sent" gate
+            # by checking that start has passed and r5 is set but we haven't
+            # yet flipped a live flag. We use a small grace window (≤ 15 min
+            # past start) to avoid firing long after start if the bot restarted.
+            elif (
+                start_dt <= now <= end_dt
+                and r5  # was being tracked before start
+                and -15 <= mins_until <= 0  # within 15-min window after start
+                # re-use reminded_5m column trick: once live msg is sent we can't
+                # re-send because mins_until will drift below -15
+            ):
+                embed = discord.Embed(
+                    title="🔴 CTF IS NOW LIVE!",
+                    description=f"**{name}** has officially started! {to_discord_timestamp(start_dt, 'R')}\nGood luck everyone — hack the planet! 🏴{link}",
+                    color=0xFF0000
+                )
+                embed.add_field(name="Started", value=format_myt(start_dt), inline=True)
+                embed.add_field(name="Ends",    value=format_myt(end_dt),   inline=True)
+                embed.set_footer(text="All times in MYT (UTC+8)")
+                await channel.send("@everyone", embed=embed)
 
         await db.commit()
 

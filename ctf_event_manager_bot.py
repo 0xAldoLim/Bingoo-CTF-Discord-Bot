@@ -328,6 +328,7 @@ async def help_cmd(interaction: discord.Interaction):
         ("🏦 /leaderboard",       "View the richest players"),
         ("🪨 /rps",               "Rock Paper Scissors — casual or with a wager"),
         ("🃏 /blackjack",         "Play Blackjack — bet and try to beat the dealer"),
+        ("🧮 /math",              "Solve a math problem in 5s to earn $50"),
     ]
     for name, desc in econ_cmds:
         embed.add_field(name=name, value=desc, inline=False)
@@ -677,6 +678,156 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, amoun
         inline=True
     )
     await interaction.response.send_message(embed=embed)
+
+# =============================================
+#             MATH CHALLENGE
+# =============================================
+
+MATH_REWARD = 50
+MATH_TIME_LIMIT = 5  # seconds
+
+def generate_math_question() -> tuple[str, int]:
+    """Generate a random 2-digit math question that always produces a whole number."""
+    op = random.choice(["+", "-", "×", "÷"])
+
+    if op == "+":
+        a = random.randint(10, 99)
+        b = random.randint(10, 99)
+        return f"{a} + {b}", a + b
+
+    elif op == "-":
+        # Ensure a >= b so result is non-negative
+        a = random.randint(10, 99)
+        b = random.randint(10, a)
+        return f"{a} - {b}", a - b
+
+    elif op == "×":
+        a = random.randint(10, 99)
+        b = random.randint(10, 99)
+        return f"{a} × {b}", a * b
+
+    else:  # ÷
+        # Generate by working backwards: pick b and result, then a = b * result
+        b = random.randint(10, 99)
+        result = random.randint(2, 15)
+        a = b * result
+        return f"{a} ÷ {b}", result
+
+
+class MathAnswerModal(discord.ui.Modal, title="🧮 Answer"):
+    answer = discord.ui.TextInput(
+        label="Your Answer",
+        placeholder="Type the number...",
+        required=True,
+        max_length=10,
+    )
+
+    def __init__(self, correct_answer: int, start_time: datetime, user_id: str):
+        super().__init__()
+        self.correct_answer = correct_answer
+        self.start_time = start_time
+        self.user_id = user_id
+
+    async def on_submit(self, interaction: discord.Interaction):
+        elapsed = (datetime.now(MYT) - self.start_time).total_seconds()
+
+        # Validate input is a number
+        try:
+            user_answer = int(self.answer.value.strip())
+        except ValueError:
+            embed = discord.Embed(title="🧮 Math Challenge", color=0xFF4444)
+            embed.add_field(name="Result", value="❌ That's not a valid number!", inline=False)
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+            return
+
+        # Check time limit
+        if elapsed > MATH_TIME_LIMIT:
+            embed = discord.Embed(title="🧮 Math Challenge — Too Slow!", color=0xFF4444)
+            embed.add_field(name="Your Answer", value=f"`{user_answer}`", inline=True)
+            embed.add_field(name="Correct Answer", value=f"`{self.correct_answer}`", inline=True)
+            embed.add_field(name="Time", value=f"⏱️ {elapsed:.1f}s (limit: {MATH_TIME_LIMIT}s)", inline=False)
+            embed.add_field(name="Result", value="⏰ **Time's up!** No reward.", inline=False)
+            await interaction.response.send_message(embed=embed)
+            return
+
+        # Check correctness
+        if user_answer == self.correct_answer:
+            new_bal = await adjust_balance(self.user_id, MATH_REWARD, is_win=True)
+            embed = discord.Embed(title="🧮 Math Challenge — Correct!", color=0x00FF88)
+            embed.add_field(name="Your Answer", value=f"`{user_answer}` ✅", inline=True)
+            embed.add_field(name="Time", value=f"⏱️ {elapsed:.1f}s", inline=True)
+            embed.add_field(name="Reward", value=f"🎉 **+${MATH_REWARD}**", inline=True)
+            embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
+        else:
+            embed = discord.Embed(title="🧮 Math Challenge — Wrong!", color=0xFF4444)
+            embed.add_field(name="Your Answer", value=f"`{user_answer}` ❌", inline=True)
+            embed.add_field(name="Correct Answer", value=f"`{self.correct_answer}`", inline=True)
+            embed.add_field(name="Time", value=f"⏱️ {elapsed:.1f}s", inline=True)
+            embed.add_field(name="Result", value="💀 **Wrong answer!** No reward.", inline=False)
+
+        await interaction.response.send_message(embed=embed)
+
+
+class MathChallengeView(discord.ui.View):
+    def __init__(self, correct_answer: int, start_time: datetime, user_id: str):
+        super().__init__(timeout=MATH_TIME_LIMIT + 1)
+        self.correct_answer = correct_answer
+        self.start_time = start_time
+        self.user_id = user_id
+        self.answered = False
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if str(interaction.user.id) != self.user_id:
+            await interaction.response.send_message("This isn't your challenge!", ephemeral=True)
+            return False
+        return True
+
+    @discord.ui.button(label="Answer!", style=discord.ButtonStyle.success, emoji="✏️")
+    async def answer_btn(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if self.answered:
+            await interaction.response.send_message("You already answered!", ephemeral=True)
+            return
+
+        elapsed = (datetime.now(MYT) - self.start_time).total_seconds()
+        if elapsed > MATH_TIME_LIMIT:
+            self.answered = True
+            self.stop()
+            embed = discord.Embed(title="🧮 Math Challenge — Too Slow!", color=0xFF4444)
+            embed.add_field(name="Correct Answer", value=f"`{self.correct_answer}`", inline=True)
+            embed.add_field(name="Result", value="⏰ **Time's up!** No reward.", inline=False)
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+
+        self.answered = True
+        self.stop()
+        modal = MathAnswerModal(self.correct_answer, self.start_time, self.user_id)
+        await interaction.response.send_modal(modal)
+
+    async def on_timeout(self):
+        if not self.answered:
+            self.answered = True
+
+
+@bot.tree.command(name="math", description="Solve a math problem in 5 seconds to earn $50!", guild=MY_GUILD)
+async def math_cmd(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    await get_wallet(user_id)  # ensure wallet exists
+
+    question, answer = generate_math_question()
+    start_time = datetime.now(MYT)
+
+    embed = discord.Embed(title="🧮 Math Challenge!", color=0x3498DB)
+    embed.add_field(name="Solve this", value=f"## `{question} = ?`", inline=False)
+    embed.add_field(name="Reward", value=f"💰 **${MATH_REWARD}**", inline=True)
+    embed.add_field(name="Time Limit", value=f"⏱️ **{MATH_TIME_LIMIT}s**", inline=True)
+    embed.set_footer(text="Click the button below to answer!")
+
+    view = MathChallengeView(answer, start_time, user_id)
+    await interaction.response.send_message(embed=embed, view=view)
+
+# =============================================
+#               BLACKJACK
+# =============================================
 
 CARD_VALUES = {"2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8,
                "9": 9, "10": 10, "J": 10, "Q": 10, "K": 10, "A": 11}

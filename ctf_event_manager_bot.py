@@ -684,7 +684,7 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, amoun
 # =============================================
 
 MATH_REWARD = 50
-MATH_TIME_LIMIT = 5  # seconds
+MATH_TIME_LIMIT = 10  # seconds
 
 def generate_math_question() -> tuple[str, int]:
     """Generate a random 2-digit math question that always produces a whole number."""

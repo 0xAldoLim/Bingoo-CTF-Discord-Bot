@@ -95,13 +95,21 @@ async def init_db():
             CREATE TABLE IF NOT EXISTS wallets (
                 user_id TEXT PRIMARY KEY,
                 balance INTEGER NOT NULL DEFAULT 1000,
+                bank INTEGER NOT NULL DEFAULT 0,
                 total_earned INTEGER NOT NULL DEFAULT 0,
                 total_lost INTEGER NOT NULL DEFAULT 0,
+                total_taxed INTEGER NOT NULL DEFAULT 0,
                 games_won INTEGER NOT NULL DEFAULT 0,
                 games_lost INTEGER NOT NULL DEFAULT 0,
                 games_tied INTEGER NOT NULL DEFAULT 0,
+                bj_wins INTEGER NOT NULL DEFAULT 0,
+                bj_losses INTEGER NOT NULL DEFAULT 0,
+                bj_pushes INTEGER NOT NULL DEFAULT 0,
+                bj_blackjacks INTEGER NOT NULL DEFAULT 0,
+                bj_bankruptcies INTEGER NOT NULL DEFAULT 0,
                 daily_streak INTEGER NOT NULL DEFAULT 0,
-                last_daily TEXT
+                last_daily TEXT,
+                last_weekly TEXT
             )
         """)
         # Migration for older databases
@@ -117,6 +125,22 @@ async def init_db():
         for col, sql in migrations.items():
             if col not in columns:
                 await db.execute(sql)
+        # Wallet migrations
+        cursor2 = await db.execute("PRAGMA table_info(wallets)")
+        wcols = [row[1] for row in await cursor2.fetchall()]
+        wallet_migrations = {
+            "bank":             "ALTER TABLE wallets ADD COLUMN bank INTEGER NOT NULL DEFAULT 0",
+            "total_taxed":      "ALTER TABLE wallets ADD COLUMN total_taxed INTEGER NOT NULL DEFAULT 0",
+            "bj_wins":          "ALTER TABLE wallets ADD COLUMN bj_wins INTEGER NOT NULL DEFAULT 0",
+            "bj_losses":        "ALTER TABLE wallets ADD COLUMN bj_losses INTEGER NOT NULL DEFAULT 0",
+            "bj_pushes":        "ALTER TABLE wallets ADD COLUMN bj_pushes INTEGER NOT NULL DEFAULT 0",
+            "bj_blackjacks":    "ALTER TABLE wallets ADD COLUMN bj_blackjacks INTEGER NOT NULL DEFAULT 0",
+            "bj_bankruptcies":  "ALTER TABLE wallets ADD COLUMN bj_bankruptcies INTEGER NOT NULL DEFAULT 0",
+            "last_weekly":      "ALTER TABLE wallets ADD COLUMN last_weekly TEXT",
+        }
+        for col, sql in wallet_migrations.items():
+            if col not in wcols:
+                await db.execute(sql)
         await db.commit()
 
 # ========= ECONOMY HELPERS =========
@@ -125,6 +149,10 @@ STARTING_BALANCE = 1000
 DAILY_BASE = 75
 DAILY_STREAK_BONUS = 10   # extra per consecutive day, capped at 10 days
 DAILY_COOLDOWN_HOURS = 20  # must wait this long between /daily claims
+WEEKLY_REWARD = 500
+WEEKLY_COOLDOWN_DAYS = 7
+BANK_WITHDRAW_FEE = 0.05  # 5% fee on withdrawals
+GIVE_TAX_RATE = 0.05       # 5% tax on transfers
 
 async def get_wallet(user_id: str) -> dict:
     """Get or create a wallet for a user."""
@@ -165,6 +193,25 @@ async def adjust_balance(user_id: str, amount: int, is_win: bool = None):
         updates["games_tied"] = wallet["games_tied"] + 1
     await update_wallet(user_id, **updates)
     return new_balance
+
+async def track_bj(user_id: str, result: str):
+    """Track blackjack-specific stats. result: 'win', 'loss', 'push', 'blackjack', 'bankrupt'."""
+    wallet = await get_wallet(user_id)
+    updates = {}
+    if result == "win":
+        updates["bj_wins"] = wallet.get("bj_wins", 0) + 1
+    elif result == "loss":
+        updates["bj_losses"] = wallet.get("bj_losses", 0) + 1
+        # Check if balance hit 0 after this loss
+        if wallet["balance"] == 0:
+            updates["bj_bankruptcies"] = wallet.get("bj_bankruptcies", 0) + 1
+    elif result == "push":
+        updates["bj_pushes"] = wallet.get("bj_pushes", 0) + 1
+    elif result == "blackjack":
+        updates["bj_blackjacks"] = wallet.get("bj_blackjacks", 0) + 1
+        updates["bj_wins"] = wallet.get("bj_wins", 0) + 1
+    if updates:
+        await update_wallet(user_id, **updates)
 
 # ========= CHOICES =========
 
@@ -322,13 +369,18 @@ async def help_cmd(interaction: discord.Interaction):
     embed.add_field(name="── Economy & Games ──", value="\u200b", inline=False)
     econ_cmds = [
         ("💰 /balance",           "Check your coin balance and stats"),
+        ("🏦 /bank",              "Deposit, withdraw (5% fee), or check bank balance"),
         ("📦 /daily",             "Claim your daily coin reward (streak bonus!)"),
-        ("🫠 /beg",               "Beg for coins when you're broke ($1-10)"),
-        ("💸 /give",              "Send coins to another user"),
+        ("🗓️ /weekly",            "Claim your weekly $500 reward"),
+        ("🫠 /beg",               "Beg for coins when you're broke ($0-10)"),
+        ("💸 /give",              "Send coins to another user (5% tax)"),
         ("🏦 /leaderboard",       "View the richest players"),
         ("🪨 /rps",               "Rock Paper Scissors — casual or with a wager"),
         ("🃏 /blackjack",         "Play Blackjack — bet and try to beat the dealer"),
-        ("🧮 /math",              "Solve a math problem in 5s to earn $50"),
+        ("🃏 /bjstats",           "View your Blackjack win/loss/bankruptcy stats"),
+        ("🪙 /cointoss",          "Flip a coin — double or nothing"),
+        ("🎰 /roulette",          "Spin the roulette wheel"),
+        ("🧮 /math",              "Solve a math problem in 10s to earn $50"),
     ]
     for name, desc in econ_cmds:
         embed.add_field(name=name, value=desc, inline=False)
@@ -651,22 +703,27 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, amoun
 
     receiver_wallet = await get_wallet(receiver_id)
 
-    # Transfer
+    # 5% transfer tax — money destroyed as a sink
+    tax = max(1, int(amount * GIVE_TAX_RATE))
+    received = amount - tax
+
     await update_wallet(sender_id,
         balance=sender_wallet["balance"] - amount,
         total_lost=sender_wallet["total_lost"] + amount,
+        total_taxed=sender_wallet.get("total_taxed", 0) + tax,
     )
     await update_wallet(receiver_id,
-        balance=receiver_wallet["balance"] + amount,
-        total_earned=receiver_wallet["total_earned"] + amount,
+        balance=receiver_wallet["balance"] + received,
+        total_earned=receiver_wallet["total_earned"] + received,
     )
 
     embed = discord.Embed(title="💸 Transfer Complete!", color=0x2ECC71)
     embed.add_field(
         name="Transaction",
-        value=f"**{interaction.user.display_name}** → **${amount}** → **{user.display_name}**",
+        value=f"**{interaction.user.display_name}** sent **${amount}** → **{user.display_name}** received **${received}**",
         inline=False
     )
+    embed.add_field(name="Tax (5%)", value=f"🏛️ **${tax}** destroyed", inline=False)
     embed.add_field(
         name=f"{interaction.user.display_name}'s Balance",
         value=f"💰 **${sender_wallet['balance'] - amount}**",
@@ -674,7 +731,7 @@ async def give_cmd(interaction: discord.Interaction, user: discord.Member, amoun
     )
     embed.add_field(
         name=f"{user.display_name}'s Balance",
-        value=f"💰 **${receiver_wallet['balance'] + amount}**",
+        value=f"💰 **${receiver_wallet['balance'] + received}**",
         inline=True
     )
     await interaction.response.send_message(embed=embed)
@@ -876,6 +933,7 @@ class BlackjackView(discord.ui.View):
         if self.user_id in blackjack_games:
             game = blackjack_games.pop(self.user_id)
             await adjust_balance(self.user_id, -game["bet"], is_win=False)
+            await track_bj(self.user_id, "loss")
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary, emoji="🃏")
     async def hit(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -891,6 +949,7 @@ class BlackjackView(discord.ui.View):
             # Bust
             blackjack_games.pop(self.user_id)
             new_bal = await adjust_balance(self.user_id, -game["bet"], is_win=False)
+            await track_bj(self.user_id, "loss")
             embed = discord.Embed(title="🃏 Blackjack — BUST!", color=0xFF4444)
             embed.add_field(name="Your Hand", value=hand_display(game["player_hand"]), inline=False)
             embed.add_field(name="Dealer Hand", value=hand_display(game["dealer_hand"]), inline=False)
@@ -936,6 +995,7 @@ class BlackjackView(discord.ui.View):
         if hand_value(game["player_hand"]) > 21:
             blackjack_games.pop(self.user_id)
             new_bal = await adjust_balance(self.user_id, -game["bet"], is_win=False)
+            await track_bj(self.user_id, "loss")
             embed = discord.Embed(title="🃏 Blackjack — BUST! (Double Down)", color=0xFF4444)
             embed.add_field(name="Your Hand", value=hand_display(game["player_hand"]), inline=False)
             embed.add_field(name="Dealer Hand", value=hand_display(game["dealer_hand"]), inline=False)
@@ -963,18 +1023,22 @@ class BlackjackView(discord.ui.View):
             result = f"🎉 **Dealer busts!** You win **+${bet}**!"
             color = 0x00FF88
             new_bal = await adjust_balance(self.user_id, bet, is_win=True)
+            await track_bj(self.user_id, "win")
         elif pval > dval:
             result = f"🎉 **You win +${bet}!**"
             color = 0x00FF88
             new_bal = await adjust_balance(self.user_id, bet, is_win=True)
+            await track_bj(self.user_id, "win")
         elif pval < dval:
             result = f"💀 **Dealer wins.** You lose **${bet}**."
             color = 0xFF4444
             new_bal = await adjust_balance(self.user_id, -bet, is_win=False)
+            await track_bj(self.user_id, "loss")
         else:
             result = f"🔄 **Push!** Your **${bet}** is returned."
             color = 0xFFD700
             await adjust_balance(self.user_id, 0, is_win=None)
+            await track_bj(self.user_id, "push")
             new_bal = (await get_wallet(self.user_id))["balance"]
 
         embed = discord.Embed(title="🃏 Blackjack — Result", color=color)
@@ -1024,6 +1088,7 @@ async def blackjack_cmd(interaction: discord.Interaction, bet: int = 50):
     if pval == 21 and dval == 21:
         # Both blackjack = push
         await adjust_balance(user_id, 0, is_win=None)
+        await track_bj(user_id, "push")
         embed = discord.Embed(title="🃏 Blackjack — Double Blackjack!", color=0xFFD700)
         embed.add_field(name="Your Hand", value=hand_display(player_hand), inline=False)
         embed.add_field(name="Dealer Hand", value=hand_display(dealer_hand), inline=False)
@@ -1036,6 +1101,7 @@ async def blackjack_cmd(interaction: discord.Interaction, bet: int = 50):
         # Player natural blackjack = 1.5x payout
         winnings = int(bet * 1.5)
         new_bal = await adjust_balance(user_id, winnings, is_win=True)
+        await track_bj(user_id, "blackjack")
         embed = discord.Embed(title="🃏 Blackjack — BLACKJACK! 🎰", color=0x00FF88)
         embed.add_field(name="Your Hand", value=hand_display(player_hand), inline=False)
         embed.add_field(name="Dealer Hand", value=hand_display(dealer_hand), inline=False)
@@ -1049,6 +1115,279 @@ async def blackjack_cmd(interaction: discord.Interaction, bet: int = 50):
     view = BlackjackView(user_id)
     embed = view.build_game_embed(game)
     await interaction.response.send_message(embed=embed, view=view)
+
+# =============================================
+#          BJSTATS / BANK / ROULETTE / COINTOSS / WEEKLY
+# =============================================
+
+# ---- /bjstats ----
+
+@bot.tree.command(name="bjstats", description="View your Blackjack statistics", guild=MY_GUILD)
+async def bjstats_cmd(interaction: discord.Interaction):
+    wallet = await get_wallet(str(interaction.user.id))
+
+    wins = wallet.get("bj_wins", 0)
+    losses = wallet.get("bj_losses", 0)
+    pushes = wallet.get("bj_pushes", 0)
+    blackjacks = wallet.get("bj_blackjacks", 0)
+    bankruptcies = wallet.get("bj_bankruptcies", 0)
+    total = wins + losses + pushes
+
+    win_rate = f"{wins / total * 100:.1f}%" if total > 0 else "N/A"
+
+    embed = discord.Embed(title=f"🃏 {interaction.user.display_name}'s Blackjack Stats", color=0x2ECC71)
+    embed.add_field(name="Games Played", value=f"🎮 **{total}**", inline=True)
+    embed.add_field(name="Win Rate", value=f"📊 **{win_rate}**", inline=True)
+    embed.add_field(name="\u200b", value="\u200b", inline=True)  # spacer
+    embed.add_field(name="Wins", value=f"✅ **{wins}**", inline=True)
+    embed.add_field(name="Losses", value=f"❌ **{losses}**", inline=True)
+    embed.add_field(name="Pushes", value=f"🔄 **{pushes}**", inline=True)
+    embed.add_field(name="Natural 21s", value=f"🎰 **{blackjacks}**", inline=True)
+    embed.add_field(name="Bankruptcies", value=f"💀 **{bankruptcies}**", inline=True)
+
+    if bankruptcies > 0:
+        embed.set_footer(text=f"Hit $0 from Blackjack {bankruptcies} time{'s' if bankruptcies != 1 else ''}... maybe take a break?")
+    elif total > 0 and wins > losses:
+        embed.set_footer(text="On a heater! Don't get cocky.")
+    elif total > 0:
+        embed.set_footer(text="The house always wins... eventually.")
+    else:
+        embed.set_footer(text="No games yet. Try /blackjack to start!")
+
+    await interaction.response.send_message(embed=embed)
+
+# ---- /bank ----
+
+BANK_CHOICES = [
+    app_commands.Choice(name="Deposit (wallet → bank)", value="deposit"),
+    app_commands.Choice(name="Withdraw (bank → wallet, 5% fee)", value="withdraw"),
+    app_commands.Choice(name="Check balance", value="check"),
+]
+
+@bot.tree.command(name="bank", description="Deposit, withdraw, or check your bank balance", guild=MY_GUILD)
+@app_commands.describe(action="What to do", amount="Amount to deposit/withdraw (not needed for check)")
+@app_commands.choices(action=BANK_CHOICES)
+async def bank_cmd(interaction: discord.Interaction, action: app_commands.Choice[str], amount: int = None):
+    user_id = str(interaction.user.id)
+    wallet = await get_wallet(user_id)
+
+    if action.value == "check":
+        embed = discord.Embed(title="🏦 Bank Account", color=0x3498DB)
+        embed.add_field(name="Wallet", value=f"💰 **${wallet['balance']}**", inline=True)
+        embed.add_field(name="Bank", value=f"🏦 **${wallet.get('bank', 0)}**", inline=True)
+        embed.add_field(name="Net Worth", value=f"💎 **${wallet['balance'] + wallet.get('bank', 0)}**", inline=True)
+        embed.set_footer(text="Deposits are free • Withdrawals have a 5% fee")
+        await interaction.response.send_message(embed=embed)
+        return
+
+    if amount is None or amount < 1:
+        await interaction.response.send_message("❌ Provide an amount of at least **$1**.", ephemeral=True)
+        return
+
+    if action.value == "deposit":
+        if wallet["balance"] < amount:
+            await interaction.response.send_message(f"❌ Not enough in wallet! You have **${wallet['balance']}**.", ephemeral=True)
+            return
+
+        new_balance = wallet["balance"] - amount
+        new_bank = wallet.get("bank", 0) + amount
+        await update_wallet(user_id, balance=new_balance, bank=new_bank)
+
+        embed = discord.Embed(title="🏦 Deposit Successful!", color=0x2ECC71)
+        embed.add_field(name="Deposited", value=f"**${amount}**", inline=True)
+        embed.add_field(name="Wallet", value=f"💰 **${new_balance}**", inline=True)
+        embed.add_field(name="Bank", value=f"🏦 **${new_bank}**", inline=True)
+        await interaction.response.send_message(embed=embed)
+
+    elif action.value == "withdraw":
+        bank_bal = wallet.get("bank", 0)
+        if bank_bal < amount:
+            await interaction.response.send_message(f"❌ Not enough in bank! You have **${bank_bal}**.", ephemeral=True)
+            return
+
+        fee = max(1, int(amount * BANK_WITHDRAW_FEE))
+        received = amount - fee
+        new_bank = bank_bal - amount
+        new_balance = wallet["balance"] + received
+
+        await update_wallet(user_id,
+            balance=new_balance,
+            bank=new_bank,
+            total_taxed=wallet.get("total_taxed", 0) + fee,
+        )
+
+        embed = discord.Embed(title="🏦 Withdrawal Complete!", color=0xE67E22)
+        embed.add_field(name="Withdrawn", value=f"**${amount}**", inline=True)
+        embed.add_field(name="Fee (5%)", value=f"🏛️ **-${fee}**", inline=True)
+        embed.add_field(name="Received", value=f"**${received}**", inline=True)
+        embed.add_field(name="Wallet", value=f"💰 **${new_balance}**", inline=True)
+        embed.add_field(name="Bank", value=f"🏦 **${new_bank}**", inline=True)
+        embed.set_footer(text="The 5% fee is permanently destroyed — thanks for balancing the economy!")
+        await interaction.response.send_message(embed=embed)
+
+# ---- /weekly ----
+
+@bot.tree.command(name="weekly", description="Claim your weekly $500 reward", guild=MY_GUILD)
+async def weekly_cmd(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    wallet = await get_wallet(user_id)
+    now = datetime.now(MYT)
+
+    last_weekly = wallet.get("last_weekly")
+    if last_weekly:
+        last = ensure_tz(datetime.fromisoformat(last_weekly))
+        days_since = (now - last).total_seconds() / 86400
+
+        if days_since < WEEKLY_COOLDOWN_DAYS:
+            remaining = WEEKLY_COOLDOWN_DAYS - days_since
+            d = int(remaining)
+            h = int((remaining - d) * 24)
+            await interaction.response.send_message(
+                f"⏳ Already claimed this week! Come back in **{d}d {h}h**.",
+                ephemeral=True
+            )
+            return
+
+    new_balance = wallet["balance"] + WEEKLY_REWARD
+    await update_wallet(user_id,
+        balance=new_balance,
+        total_earned=wallet["total_earned"] + WEEKLY_REWARD,
+        last_weekly=now.isoformat(),
+    )
+
+    embed = discord.Embed(title="🗓️ Weekly Reward Claimed!", color=0x9B59B6)
+    embed.add_field(name="Reward", value=f"**+${WEEKLY_REWARD}**", inline=True)
+    embed.add_field(name="Balance", value=f"💰 **${new_balance}**", inline=True)
+    embed.set_footer(text="Come back next week for another $500!")
+    await interaction.response.send_message(embed=embed)
+
+# ---- /cointoss ----
+
+@bot.tree.command(name="cointoss", description="Flip a coin — heads or tails, double or nothing!", guild=MY_GUILD)
+@app_commands.describe(
+    call="Heads or tails?",
+    bet="Amount to wager",
+)
+@app_commands.choices(call=[
+    app_commands.Choice(name="🪙 Heads", value="heads"),
+    app_commands.Choice(name="🪙 Tails", value="tails"),
+])
+async def cointoss_cmd(interaction: discord.Interaction, call: app_commands.Choice[str], bet: int):
+    user_id = str(interaction.user.id)
+
+    if bet < 1:
+        await interaction.response.send_message("❌ Minimum bet is **$1**.", ephemeral=True)
+        return
+
+    wallet = await get_wallet(user_id)
+    if wallet["balance"] < bet:
+        await interaction.response.send_message(f"❌ Not enough coins! You have **${wallet['balance']}**.", ephemeral=True)
+        return
+
+    result = random.choice(["heads", "tails"])
+    won = call.value == result
+    result_emoji = "🟡" if result == "heads" else "⚫"
+
+    if won:
+        new_bal = await adjust_balance(user_id, bet, is_win=True)
+        embed = discord.Embed(title=f"🪙 Coin Toss — {result_emoji} {result.upper()}!", color=0x00FF88)
+        embed.add_field(name="You called", value=f"**{call.name}**", inline=True)
+        embed.add_field(name="Result", value=f"🎉 **You win +${bet}!**", inline=True)
+    else:
+        new_bal = await adjust_balance(user_id, -bet, is_win=False)
+        embed = discord.Embed(title=f"🪙 Coin Toss — {result_emoji} {result.upper()}!", color=0xFF4444)
+        embed.add_field(name="You called", value=f"**{call.name}**", inline=True)
+        embed.add_field(name="Result", value=f"💀 **You lose ${bet}.**", inline=True)
+
+    embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# ---- /roulette ----
+
+ROULETTE_REDS = {1,3,5,7,9,12,14,16,18,19,21,23,25,27,30,32,34,36}
+ROULETTE_BLACKS = {2,4,6,8,10,11,13,15,17,20,22,24,26,28,29,31,33,35}
+
+ROULETTE_BETS = [
+    app_commands.Choice(name="🔴 Red (2x)", value="red"),
+    app_commands.Choice(name="⚫ Black (2x)", value="black"),
+    app_commands.Choice(name="🟢 Green / 0 (14x)", value="green"),
+    app_commands.Choice(name="Odd (2x)", value="odd"),
+    app_commands.Choice(name="Even (2x)", value="even"),
+    app_commands.Choice(name="1-18 (2x)", value="low"),
+    app_commands.Choice(name="19-36 (2x)", value="high"),
+]
+
+@bot.tree.command(name="roulette", description="Spin the roulette wheel!", guild=MY_GUILD)
+@app_commands.describe(choice="What to bet on", bet="Amount to wager")
+@app_commands.choices(choice=ROULETTE_BETS)
+async def roulette_cmd(interaction: discord.Interaction, choice: app_commands.Choice[str], bet: int):
+    await interaction.response.defer()
+    user_id = str(interaction.user.id)
+
+    if bet < 1:
+        await interaction.followup.send("❌ Minimum bet is **$1**.", ephemeral=True)
+        return
+
+    wallet = await get_wallet(user_id)
+    if wallet["balance"] < bet:
+        await interaction.followup.send(f"❌ Not enough coins! You have **${wallet['balance']}**.", ephemeral=True)
+        return
+
+    # Spin — numbers 0-36 (0 is green, giving house edge)
+    number = random.randint(0, 36)
+
+    if number == 0:
+        color_name, color_emoji = "Green", "🟢"
+    elif number in ROULETTE_REDS:
+        color_name, color_emoji = "Red", "🔴"
+    else:
+        color_name, color_emoji = "Black", "⚫"
+
+    is_odd = number > 0 and number % 2 == 1
+    is_even = number > 0 and number % 2 == 0
+    is_low = 1 <= number <= 18
+    is_high = 19 <= number <= 36
+
+    # Determine win
+    pick = choice.value
+    won = False
+    multiplier = 2
+
+    if pick == "red" and number in ROULETTE_REDS:
+        won = True
+    elif pick == "black" and number in ROULETTE_BLACKS:
+        won = True
+    elif pick == "green" and number == 0:
+        won = True
+        multiplier = 14
+    elif pick == "odd" and is_odd:
+        won = True
+    elif pick == "even" and is_even:
+        won = True
+    elif pick == "low" and is_low:
+        won = True
+    elif pick == "high" and is_high:
+        won = True
+
+    if won:
+        winnings = bet * (multiplier - 1)  # net gain
+        new_bal = await adjust_balance(user_id, winnings, is_win=True)
+        result_text = f"🎉 **You win +${winnings}!** ({multiplier}x payout)"
+        embed_color = 0x00FF88
+    else:
+        new_bal = await adjust_balance(user_id, -bet, is_win=False)
+        result_text = f"💀 **You lose ${bet}.**"
+        embed_color = 0xFF4444
+
+    embed = discord.Embed(title="🎰 Roulette", color=embed_color)
+    embed.add_field(name="The Wheel Landed On", value=f"{color_emoji} **{number}** ({color_name})", inline=False)
+    embed.add_field(name="Your Bet", value=f"**{choice.name}** — ${bet}", inline=True)
+    embed.add_field(name="Result", value=result_text, inline=True)
+    embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
+
+    if number == 0 and pick != "green":
+        embed.set_footer(text="The house always has an edge... 🟢")
+    await interaction.followup.send(embed=embed)
 
 # ---- /add_event ----
 

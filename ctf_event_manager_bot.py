@@ -563,22 +563,58 @@ BEG_RESPONSES = [
     "You speed-ran going broke. New PB! Consolation prize: **${amount}**.",
 ]
 
-@bot.tree.command(name="beg", description="Beg for coins when you're broke", guild=MY_GUILD)
+BEG_FAIL_RESPONSES = [
+    "You held out your hand. Everyone walked past. **$0.** Maybe shower first?",
+    "You begged, but the economy said no. **$0.** Touch grass.",
+    "A bird flew by and stole your last shred of dignity. **$0.**",
+    "You asked for money. The bot laughed. **$0.** Try again in 60 seconds, champ.",
+    "You tried your best. Your best was not enough. **$0.**",
+    "Nobody even made eye contact. **$0.** Down bad fr.",
+    "The universe considered your request and declined. **$0.**",
+    "You opened your wallet to show how empty it is. A moth flew out. **$0.**",
+    "You stood in the rain holding a sign. It said 'will CTF for food'. Nobody cared. **$0.**",
+    "Error 404: Sympathy not found. **$0.**",
+]
+
+beg_cooldowns = {}  # {user_id: last_beg_timestamp}
+
+@bot.tree.command(name="beg", description="Beg for coins when you're broke (60s cooldown)", guild=MY_GUILD)
 async def beg_cmd(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
+    now = datetime.now(MYT)
+
+    # Check cooldown
+    if user_id in beg_cooldowns:
+        elapsed = (now - beg_cooldowns[user_id]).total_seconds()
+        if elapsed < 60:
+            remaining = int(60 - elapsed)
+            await interaction.response.send_message(
+                f"⏳ Slow down! You can beg again in **{remaining}s**.",
+                ephemeral=True
+            )
+            return
+
+    beg_cooldowns[user_id] = now
     wallet = await get_wallet(user_id)
 
-    amount = random.randint(1, 10)
-    new_bal = wallet["balance"] + amount
+    # ~30% chance of getting nothing
+    amount = random.choice([0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10])
 
-    await update_wallet(user_id,
-        balance=new_bal,
-        total_earned=wallet["total_earned"] + amount,
-    )
+    if amount == 0:
+        msg = random.choice(BEG_FAIL_RESPONSES)
+        embed = discord.Embed(title="🫠 Begging...", description=msg, color=0x7F8C8D)
+        embed.add_field(name="Balance", value=f"💰 **${wallet['balance']}** (unchanged)", inline=False)
+    else:
+        new_bal = wallet["balance"] + amount
+        await update_wallet(user_id,
+            balance=new_bal,
+            total_earned=wallet["total_earned"] + amount,
+        )
+        msg = random.choice(BEG_RESPONSES).replace("${amount}", f"${amount}")
+        embed = discord.Embed(title="🫠 Begging...", description=msg, color=0x95A5A6)
+        embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
 
-    msg = random.choice(BEG_RESPONSES).replace("${amount}", f"${amount}")
-    embed = discord.Embed(title="🫠 Begging...", description=msg, color=0x95A5A6)
-    embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
+    embed.set_footer(text="Cooldown: 60 seconds")
     await interaction.response.send_message(embed=embed)
 
 # ---- /give ----

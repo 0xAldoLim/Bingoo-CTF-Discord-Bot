@@ -323,8 +323,10 @@ async def help_cmd(interaction: discord.Interaction):
     econ_cmds = [
         ("💰 /balance",           "Check your coin balance and stats"),
         ("📦 /daily",             "Claim your daily coin reward (streak bonus!)"),
+        ("🫠 /beg",               "Beg for coins when you're broke ($1-10)"),
+        ("💸 /give",              "Send coins to another user"),
         ("🏦 /leaderboard",       "View the richest players"),
-        ("🪨 /rps",               "Rock Paper Scissors — wager your coins"),
+        ("🪨 /rps",               "Rock Paper Scissors — casual or with a wager"),
         ("🃏 /blackjack",         "Play Blackjack — bet and try to beat the dealer"),
     ]
     for name, desc in econ_cmds:
@@ -384,47 +386,56 @@ async def date_cmd(interaction: discord.Interaction):
 
 # ---- /rps ----
 
-@bot.tree.command(name="rps", description="Play Rock Paper Scissors — wager your coins!", guild=MY_GUILD)
-@app_commands.describe(choice="Pick your weapon!", bet="Amount to wager (default: 10)")
+@bot.tree.command(name="rps", description="Play Rock Paper Scissors — with or without a wager!", guild=MY_GUILD)
+@app_commands.describe(choice="Pick your weapon!", bet="Amount to wager (0 = just for fun, default: 0)")
 @app_commands.choices(choice=RPS_CHOICES)
-async def rps(interaction: discord.Interaction, choice: app_commands.Choice[str], bet: int = 10):
+async def rps(interaction: discord.Interaction, choice: app_commands.Choice[str], bet: int = 0):
     await interaction.response.defer()
     user_id = str(interaction.user.id)
 
-    if bet < 1:
-        await interaction.followup.send("❌ Minimum bet is **$1**.", ephemeral=True)
+    if bet < 0:
+        await interaction.followup.send("❌ Bet can't be negative.", ephemeral=True)
         return
 
-    wallet = await get_wallet(user_id)
-    if wallet["balance"] < bet:
-        await interaction.followup.send(f"❌ Not enough coins! You have **${wallet['balance']}**.", ephemeral=True)
-        return
+    if bet > 0:
+        wallet = await get_wallet(user_id)
+        if wallet["balance"] < bet:
+            await interaction.followup.send(f"❌ Not enough coins! You have **${wallet['balance']}**.", ephemeral=True)
+            return
 
     player_pick = choice.value
     bot_pick = random.choice(["rock", "paper", "scissors"])
 
     if player_pick == bot_pick:
-        result_text = f"🔄 **Tie!** Your **${bet}** is returned."
+        if bet > 0:
+            result_text = f"🔄 **Tie!** Your **${bet}** is returned."
+            await adjust_balance(user_id, 0, is_win=None)
+        else:
+            result_text = "🔄 **It's a tie!** Go again with `/rps`"
         result_color = 0xFFD700
-        await adjust_balance(user_id, 0, is_win=None)  # track tie
-        wallet = await get_wallet(user_id)
     elif RPS_BEATS[player_pick] == bot_pick:
-        result_text = f"🎉 **You win ${bet}!**"
+        if bet > 0:
+            result_text = f"🎉 **You win +${bet}!**"
+            await adjust_balance(user_id, bet, is_win=True)
+        else:
+            result_text = "🎉 **You win!** GG!"
         result_color = 0x00FF88
-        new_bal = await adjust_balance(user_id, bet, is_win=True)
-        wallet["balance"] = new_bal
     else:
-        result_text = f"💀 **You lose ${bet}.**"
+        if bet > 0:
+            result_text = f"💀 **You lose ${bet}.**"
+            await adjust_balance(user_id, -bet, is_win=False)
+        else:
+            result_text = "💀 **You lose!** Better luck next time."
         result_color = 0xFF4444
-        new_bal = await adjust_balance(user_id, -bet, is_win=False)
-        wallet["balance"] = new_bal
 
     embed = discord.Embed(title="Rock Paper Scissors", color=result_color)
     embed.add_field(name="You", value=f"{RPS_EMOJIS[player_pick]} {player_pick.capitalize()}", inline=True)
     embed.add_field(name="vs", value="⚔️", inline=True)
     embed.add_field(name="Bot", value=f"{RPS_EMOJIS[bot_pick]} {bot_pick.capitalize()}", inline=True)
     embed.add_field(name="Result", value=result_text, inline=False)
-    embed.add_field(name="Balance", value=f"💰 **${wallet['balance']}**", inline=False)
+    if bet > 0:
+        wallet = await get_wallet(user_id)
+        embed.add_field(name="Balance", value=f"💰 **${wallet['balance']}**", inline=False)
     await interaction.followup.send(embed=embed)
 
 # =============================================
@@ -532,9 +543,104 @@ async def leaderboard_cmd(interaction: discord.Interaction):
 
     await interaction.response.send_message(embed=embed)
 
-# =============================================
-#               BLACKJACK
-# =============================================
+# ---- /beg ----
+
+BEG_RESPONSES = [
+    "You stood on the street corner with a cardboard sign. A kind stranger tossed you **${amount}**.",
+    "You asked the bot nicely. It felt bad for you. Here's **${amount}**. Don't spend it all on blackjack.",
+    "You performed a sad little dance. Someone threw **${amount}** at you out of pity.",
+    "You crawled to the ATM and found **${amount}** stuck in the slot. Lucky you, broke boy.",
+    "A raccoon handed you **${amount}**. Even animals feel sorry for you.",
+    "You sold your dignity for **${amount}**. Worth it? Probably not.",
+    "You told everyone you're a CTF player. They donated **${amount}** out of sympathy.",
+    "You found **${amount}** under the couch cushion. This is your life now.",
+    "The bot's pity algorithm calculated you deserve exactly **${amount}**.",
+    "You begged so hard the server almost crashed. Here's **${amount}**, please stop.",
+    "You wrote a 500-word essay on why you need money. Nobody read it. Here's **${amount}** anyway.",
+    "A tumbleweed rolled by your empty wallet. A passerby dropped **${amount}** and whispered 'get good'.",
+    "You tried to hack the economy. Failed miserably. But here's **${amount}** for the effort.",
+    "Someone mistook you for a charity case. They weren't wrong. **${amount}** received.",
+    "You speed-ran going broke. New PB! Consolation prize: **${amount}**.",
+]
+
+@bot.tree.command(name="beg", description="Beg for coins when you're broke", guild=MY_GUILD)
+async def beg_cmd(interaction: discord.Interaction):
+    user_id = str(interaction.user.id)
+    wallet = await get_wallet(user_id)
+
+    amount = random.randint(1, 10)
+    new_bal = wallet["balance"] + amount
+
+    await update_wallet(user_id,
+        balance=new_bal,
+        total_earned=wallet["total_earned"] + amount,
+    )
+
+    msg = random.choice(BEG_RESPONSES).replace("${amount}", f"${amount}")
+    embed = discord.Embed(title="🫠 Begging...", description=msg, color=0x95A5A6)
+    embed.add_field(name="Balance", value=f"💰 **${new_bal}**", inline=False)
+    await interaction.response.send_message(embed=embed)
+
+# ---- /give ----
+
+@bot.tree.command(name="give", description="Give coins to another user", guild=MY_GUILD)
+@app_commands.describe(
+    user="Who to send coins to",
+    amount="Amount to give",
+)
+async def give_cmd(interaction: discord.Interaction, user: discord.Member, amount: int):
+    sender_id = str(interaction.user.id)
+    receiver_id = str(user.id)
+
+    if user.bot:
+        await interaction.response.send_message("❌ You can't give coins to a bot.", ephemeral=True)
+        return
+
+    if receiver_id == sender_id:
+        await interaction.response.send_message("❌ You can't give coins to yourself.", ephemeral=True)
+        return
+
+    if amount < 1:
+        await interaction.response.send_message("❌ Amount must be at least **$1**.", ephemeral=True)
+        return
+
+    sender_wallet = await get_wallet(sender_id)
+    if sender_wallet["balance"] < amount:
+        await interaction.response.send_message(
+            f"❌ Not enough coins! You have **${sender_wallet['balance']}**.",
+            ephemeral=True
+        )
+        return
+
+    receiver_wallet = await get_wallet(receiver_id)
+
+    # Transfer
+    await update_wallet(sender_id,
+        balance=sender_wallet["balance"] - amount,
+        total_lost=sender_wallet["total_lost"] + amount,
+    )
+    await update_wallet(receiver_id,
+        balance=receiver_wallet["balance"] + amount,
+        total_earned=receiver_wallet["total_earned"] + amount,
+    )
+
+    embed = discord.Embed(title="💸 Transfer Complete!", color=0x2ECC71)
+    embed.add_field(
+        name="Transaction",
+        value=f"**{interaction.user.display_name}** → **${amount}** → **{user.display_name}**",
+        inline=False
+    )
+    embed.add_field(
+        name=f"{interaction.user.display_name}'s Balance",
+        value=f"💰 **${sender_wallet['balance'] - amount}**",
+        inline=True
+    )
+    embed.add_field(
+        name=f"{user.display_name}'s Balance",
+        value=f"💰 **${receiver_wallet['balance'] + amount}**",
+        inline=True
+    )
+    await interaction.response.send_message(embed=embed)
 
 CARD_VALUES = {"2": 2, "3": 3, "4": 4, "5": 5, "6": 6, "7": 7, "8": 8,
                "9": 9, "10": 10, "J": 10, "Q": 10, "K": 10, "A": 11}

@@ -11,13 +11,12 @@
 - 🔴 Live status tags (Upcoming / Starting Soon / Live Now)
 - 🏆 Auto-complete past events and track placement rankings
 - 🌐 Pull upcoming CTFs directly from CTFtime
-- 🔔 Automatic reminders at 24h and 1h before events (requires 24/7 hosting)
+- 🔔 Automatic reminders at 24h, 1h, 10m, 5m before start, when LIVE, and 1h/30m before end (requires 24/7 hosting)
 - 📤 Export events to CSV for record-keeping
 - 📊 Team statistics dashboard
 - 📄 Paginated embeds for large event lists
 - 🕐 All timestamps displayed in MYT (UTC+8)
 - 🔗 CTF website URL support on all events
-- 🪨 Rock Paper Scissors mini-game
 - 👤 User info lookup
 - 🗄️ Lightweight SQLite database with auto-migration
 
@@ -69,7 +68,7 @@ TOKEN=your_discord_bot_token_here
 
 **Optional — Event Reminders:**
 
-To enable automatic reminders (24h and 1h before events), set `REMINDER_CHANNEL_ID` in the bot script to the channel ID where you want pings sent. This requires the bot to be running 24/7 (see Hosting below).
+To enable automatic reminders, set `REMINDER_CHANNEL_ID` in the bot script to the channel ID where you want pings sent. This requires the bot to be running 24/7 (see Hosting below).
 
 ---
 
@@ -111,7 +110,6 @@ python ctf_event_manager_bot.py
 | `/ping` | Check if bot is online and see latency |
 | `/whoami` | Show your user info, roles, and join date |
 | `/date` | Show current date and time in MYT |
-| `/rps` | Play Rock Paper Scissors against the bot |
 | `/help` | Show all available commands |
 
 ---

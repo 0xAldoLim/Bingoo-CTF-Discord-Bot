@@ -1061,11 +1061,18 @@ class BlackjackView(discord.ui.View):
             return
 
         wallet = await get_wallet(self.user_id)
-        if wallet["balance"] < game["bet"]:
-            await interaction.response.send_message(f"Not enough to double! Need **${game['bet']}** more.", ephemeral=True)
+        # Need enough in wallet to cover the FULL doubled bet, not just the additional half.
+        # The bank is never auto-touched — players must withdraw first.
+        doubled_bet = game["bet"] * 2
+        if wallet["balance"] < doubled_bet:
+            await interaction.response.send_message(
+                f"❌ Not enough in wallet to double down! You need **${doubled_bet}** in your wallet "
+                f"(you have **${wallet['balance']}**). Withdraw from `/bank` first if needed.",
+                ephemeral=True
+            )
             return
 
-        game["bet"] *= 2
+        game["bet"] = doubled_bet
         game["player_hand"].append(game["deck"].pop())
 
         if hand_value(game["player_hand"]) > 21:

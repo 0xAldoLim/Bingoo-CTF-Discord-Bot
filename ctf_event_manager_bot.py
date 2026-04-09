@@ -87,6 +87,11 @@ async def init_db():
                 status TEXT NOT NULL DEFAULT 'active',
                 reminded_24h INTEGER NOT NULL DEFAULT 0,
                 reminded_1h INTEGER NOT NULL DEFAULT 0,
+                reminded_10m INTEGER NOT NULL DEFAULT 0,
+                reminded_5m INTEGER NOT NULL DEFAULT 0,
+                reminded_live INTEGER NOT NULL DEFAULT 0,
+                reminded_end_1h INTEGER NOT NULL DEFAULT 0,
+                reminded_end_30m INTEGER NOT NULL DEFAULT 0,
                 placement TEXT
             )
         """)
@@ -122,6 +127,11 @@ async def init_db():
             "url": "ALTER TABLE events ADD COLUMN url TEXT",
             "reminded_24h": "ALTER TABLE events ADD COLUMN reminded_24h INTEGER NOT NULL DEFAULT 0",
             "reminded_1h": "ALTER TABLE events ADD COLUMN reminded_1h INTEGER NOT NULL DEFAULT 0",
+            "reminded_10m": "ALTER TABLE events ADD COLUMN reminded_10m INTEGER NOT NULL DEFAULT 0",
+            "reminded_5m": "ALTER TABLE events ADD COLUMN reminded_5m INTEGER NOT NULL DEFAULT 0",
+            "reminded_live": "ALTER TABLE events ADD COLUMN reminded_live INTEGER NOT NULL DEFAULT 0",
+            "reminded_end_1h": "ALTER TABLE events ADD COLUMN reminded_end_1h INTEGER NOT NULL DEFAULT 0",
+            "reminded_end_30m": "ALTER TABLE events ADD COLUMN reminded_end_30m INTEGER NOT NULL DEFAULT 0",
             "placement": "ALTER TABLE events ADD COLUMN placement TEXT",
         }
         for col, sql in migrations.items():
@@ -931,7 +941,7 @@ class MathChallengeView(discord.ui.View):
             self.answered = True
 
 
-@bot.tree.command(name="math", description="Solve a math problem in 5 seconds to earn $50!", guild=MY_GUILD)
+@bot.tree.command(name="math", description="Solve a math problem in 10 seconds to earn $50!", guild=MY_GUILD)
 async def math_cmd(interaction: discord.Interaction):
     user_id = str(interaction.user.id)
     await get_wallet(user_id)  # ensure wallet exists
@@ -2023,9 +2033,30 @@ async def stats(interaction: discord.Interaction):
 #           REMINDER BACKGROUND TASK
 # =============================================
 
-@tasks.loop(minutes=5)
+def _reminder_embed(title: str, description: str, color: int, start_dt: datetime, end_dt: datetime) -> discord.Embed:
+    embed = discord.Embed(title=title, description=description, color=color)
+    embed.add_field(name="Start", value=format_myt(start_dt), inline=True)
+    embed.add_field(name="End", value=format_myt(end_dt), inline=True)
+    embed.set_footer(text="All times in MYT (UTC+8)")
+    return embed
+
+
+@tasks.loop(minutes=1)
 async def reminder_loop():
-    """Check for events starting within 24h or 1h and send reminders."""
+    """
+    Send event reminders on a strict single-fire basis.
+
+    Pre-start reminders (fire once each):
+      - 24h, 1h, 10m, 5m before start
+      - LIVE NOW when event starts
+    End reminders (fire once each):
+      - 1h, 30m before end
+
+    Every reminder has:
+      1. A dedicated DB flag (never fires twice, even across restarts)
+      2. A grace window (never fires if we're way past the target time —
+         prevents spam when bot restarts mid-event or events are added late)
+    """
     if REMINDER_CHANNEL_ID is None:
         return
 
@@ -2037,29 +2068,122 @@ async def reminder_loop():
 
     async with aiosqlite.connect(DATABASE_PATH) as db:
         cursor = await db.execute(
-            "SELECT id, name, start_date, url, reminded_24h, reminded_1h FROM events WHERE status = 'active'"
+            """SELECT id, name, start_date, end_date, url,
+                      reminded_24h, reminded_1h, reminded_10m, reminded_5m,
+                      reminded_live, reminded_end_1h, reminded_end_30m
+               FROM events WHERE status = 'active'"""
         )
         rows = await cursor.fetchall()
 
-        for event_id, name, start_str, url, r24, r1 in rows:
-            start_dt = ensure_tz(datetime.fromisoformat(start_str))
-            hours_until = (start_dt - now).total_seconds() / 3600
+        for row in rows:
+            (event_id, name, start_str, end_str, url,
+             r24, r1, r10, r5, rlive, rend1h, rend30m) = row
 
-            # 24-hour reminder
-            if 0 < hours_until <= 24 and not r24:
-                msg = f"⏰ **Reminder:** **{name}** starts {to_discord_timestamp(start_dt, 'R')}! @everyone"
-                if url:
-                    msg += f"\n🔗 [CTF Page]({url})"
-                await channel.send(msg)
+            start_dt = ensure_tz(datetime.fromisoformat(start_str))
+            end_dt = ensure_tz(datetime.fromisoformat(end_str))
+            mins_to_start = (start_dt - now).total_seconds() / 60
+            mins_to_end   = (end_dt - now).total_seconds() / 60
+
+            link = f"\n🔗 [CTF Page]({url})" if url else ""
+
+            # Helper: should a window-based reminder fire?
+            # Fires only if flag is not set AND we're within the target window
+            # AND we haven't drifted too far past (grace window = 10 min).
+            # This prevents "catch-up" spam when the bot was offline or when
+            # events are added shortly before their start time.
+            def should_fire(flag: int, mins_until: float, window_start: float, window_end: float) -> bool:
+                if flag:
+                    return False
+                # mins_until must be within (window_start, window_end] AND
+                # within the 10-min grace window after target.
+                return -10 < mins_until <= window_end and mins_until > window_start
+
+            # ============= PRE-START REMINDERS =============
+
+            # 24h — fires when 60 < mins_to_start <= 1440
+            if should_fire(r24, mins_to_start, 60, 1440):
+                embed = _reminder_embed(
+                    "⏰ CTF Starting in 24 Hours!",
+                    f"**{name}** kicks off {to_discord_timestamp(start_dt, 'R')}.\nGet ready!{link}",
+                    0x5865F2, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
                 await db.execute("UPDATE events SET reminded_24h = 1 WHERE id = ?", (event_id,))
 
-            # 1-hour reminder
-            if 0 < hours_until <= 1 and not r1:
-                msg = f"🚨 **Starting soon:** **{name}** begins {to_discord_timestamp(start_dt, 'R')}! Get ready! @everyone"
-                if url:
-                    msg += f"\n🔗 [CTF Page]({url})"
-                await channel.send(msg)
+            # 1h — fires when 10 < mins_to_start <= 60
+            if should_fire(r1, mins_to_start, 10, 60):
+                embed = _reminder_embed(
+                    "⚠️ CTF Starting in 1 Hour!",
+                    f"**{name}** starts {to_discord_timestamp(start_dt, 'R')}.\nWarm up those fingers! 🧠{link}",
+                    0xFFD700, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
                 await db.execute("UPDATE events SET reminded_1h = 1 WHERE id = ?", (event_id,))
+
+            # 10m — fires when 5 < mins_to_start <= 10
+            if should_fire(r10, mins_to_start, 5, 10):
+                embed = _reminder_embed(
+                    "🚨 CTF Starting in 10 Minutes!",
+                    f"**{name}** goes live {to_discord_timestamp(start_dt, 'R')}.\nOpen your browsers and stand by! 🖥️{link}",
+                    0xFF8C00, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_10m = 1 WHERE id = ?", (event_id,))
+
+            # 5m — fires when 0 < mins_to_start <= 5
+            if should_fire(r5, mins_to_start, 0, 5):
+                embed = _reminder_embed(
+                    "🔥 CTF Starting in 5 Minutes!",
+                    f"**{name}** is almost live — {to_discord_timestamp(start_dt, 'R')}!\nEveryone on deck! 💻{link}",
+                    0xFF4444, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_5m = 1 WHERE id = ?", (event_id,))
+
+            # LIVE NOW — fires ONCE when event is live, with 10-min grace window
+            # Only fires if the event started within the last 10 minutes to
+            # prevent "catch-up" spam when the bot starts up mid-event.
+            if not rlive and start_dt <= now <= end_dt and mins_to_start >= -10:
+                embed = _reminder_embed(
+                    "🔴 CTF IS NOW LIVE!",
+                    f"**{name}** has officially started!\nGood luck everyone — hack the planet! 🏴{link}",
+                    0xFF0000, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_live = 1 WHERE id = ?", (event_id,))
+            elif not rlive and start_dt <= now:
+                # Event already started more than 10 min ago — silently mark
+                # as sent so we don't spam when bot restarts mid-event.
+                await db.execute("UPDATE events SET reminded_live = 1 WHERE id = ?", (event_id,))
+
+            # ============= END-OF-EVENT REMINDERS =============
+            # Only fire if event is currently running (after start, before end)
+
+            # 1h before end — fires when 30 < mins_to_end <= 60
+            if not rend1h and start_dt <= now and should_fire(0, mins_to_end, 30, 60):
+                embed = _reminder_embed(
+                    "⏳ CTF Ending in 1 Hour!",
+                    f"**{name}** wraps up {to_discord_timestamp(end_dt, 'R')}.\nSubmit your last flags! 🏴{link}",
+                    0xE67E22, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_end_1h = 1 WHERE id = ?", (event_id,))
+
+            # 30m before end — fires when 0 < mins_to_end <= 30
+            if not rend30m and start_dt <= now and should_fire(0, mins_to_end, 0, 30):
+                embed = _reminder_embed(
+                    "⌛ CTF Ending in 30 Minutes!",
+                    f"**{name}** ends {to_discord_timestamp(end_dt, 'R')}.\nFinal push — get those flags in! 🚩{link}",
+                    0xC0392B, start_dt, end_dt
+                )
+                await channel.send("@everyone", embed=embed)
+                await db.execute("UPDATE events SET reminded_end_30m = 1 WHERE id = ?", (event_id,))
+
+            # Silently mark missed end reminders as sent (don't spam after restart)
+            if not rend1h and mins_to_end <= 30:
+                await db.execute("UPDATE events SET reminded_end_1h = 1 WHERE id = ?", (event_id,))
+            if not rend30m and mins_to_end <= 0:
+                await db.execute("UPDATE events SET reminded_end_30m = 1 WHERE id = ?", (event_id,))
 
         await db.commit()
 
